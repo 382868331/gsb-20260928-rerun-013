@@ -1,0 +1,2 @@
+# 仅使用 Python 标准库；pytest 用于开发测试。
+pytest
