@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
 from itertools import count
@@ -22,6 +23,44 @@ GATE_OUTPUT = "out"
 
 class CircuitError(ValueError):
     pass
+
+
+def circuit_fingerprint(
+    nodes: dict[str, dict[str, Any]],
+    edges: list[dict[str, str]],
+    events: list[tuple[int, str, Any]],
+    max_time: int,
+) -> str:
+    """Return a canonical content fingerprint for a simulated revision.
+
+    Node positions intentionally do not participate: moving a gate on the
+    canvas must not invalidate or misattribute simulation results.
+    """
+    canonical = {
+        "edges": [
+            {"source": edge["source"], "target": edge["target"], "targetPort": edge["targetPort"]}
+            for edge in sorted(
+                edges,
+                key=lambda edge: (edge["source"], edge["target"], edge["targetPort"]),
+            )
+        ],
+        "nodes": [
+            {
+                "id": node["id"],
+                "type": node["type"],
+                "label": node["label"],
+                "delay": node["delay"],
+                "initial": node["initial"],
+            }
+            for node in sorted(nodes.values(), key=lambda item: item["id"])
+        ],
+        "events": [
+            {"time": time, "node": node_id, "value": value}
+            for time, node_id, value in sorted(events, key=lambda item: (item[0], item[1], str(item[2])))
+        ],
+        "maxTime": int(max_time),
+    }
+    return json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(order=True)
@@ -292,6 +331,7 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
         status = "truncated"
 
     return {
+        "fingerprint": circuit_fingerprint(nodes, edges, scheduled_input_events, max_time),
         "status": status,
         "maxTime": max_time,
         "processedEvents": processed,

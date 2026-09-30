@@ -41,6 +41,7 @@ export type Diagnostic = {
 };
 
 export type SimulationResult = {
+  fingerprint: string;
   status: "stable" | "oscillating" | "truncated";
   maxTime: number;
   processedEvents: number;

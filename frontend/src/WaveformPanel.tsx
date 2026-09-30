@@ -1,4 +1,5 @@
 import type { LogicValue, SimulationResult } from "./types";
+import { shortFingerprint } from "./fingerprint";
 
 const rowHeight = 44;
 const leftWidth = 118;
@@ -12,7 +13,7 @@ function valueAt(trace: Array<{ time: number; value: LogicValue }>, time: number
   return value;
 }
 
-function SignalPath({ trace, maxTime, row }: { trace: Array<{ time: number; value: LogicValue }>; maxTime: number; row: number }) {
+function buildPath(trace: Array<{ time: number; value: LogicValue }>, maxTime: number, row: number) {
   const width = 1000 - leftWidth;
   const y = (value: LogicValue) => {
     if (value === 1) return row * rowHeight + 7;
@@ -32,34 +33,59 @@ function SignalPath({ trace, maxTime, row }: { trace: Array<{ time: number; valu
     }
   });
   const endX = leftWidth + width;
-  const current = valueAt(trace, maxTime);
-  commands.push(`L ${endX} ${y(current)}`);
-  return <path className={`signal signal-${String(current)}`} d={commands.join(" ")} />;
+  commands.push(`L ${endX} ${y(valueAt(trace, maxTime))}`);
+  return commands.join(" ");
 }
 
-export function WaveformPanel({ result }: { result: SimulationResult | null }) {
-  if (!result) return <div className="empty-panel">运行后在这里查看真实事件生成的波形。</div>;
-  const rows = Object.entries(result.waveforms);
+type BaselineLike = { label: string; fingerprint: string; result: SimulationResult };
+
+export function WaveformPanel({ result, baseline }: { result: SimulationResult | null; baseline?: BaselineLike | null }) {
+  const shown = result ?? baseline?.result ?? null;
+  if (!shown) return <div className="empty-panel">运行后在这里查看真实事件生成的波形。</div>;
+  const rows = Array.from(new Set([
+    ...Object.keys(result?.waveforms ?? {}),
+    ...Object.keys(baseline?.result.waveforms ?? {}),
+  ])).sort();
+  const maxTime = Math.max(result?.maxTime ?? 0, baseline?.result.maxTime ?? 0);
   return (
     <div className="waveform-wrap">
+      {baseline && (
+        <div className="wave-legend">
+          <span className="legend-current">— 当前修订 {result ? shortFingerprint(result.fingerprint) : "（未运行）"}</span>
+          <span className="legend-baseline">-- 基线 {baseline.label} {shortFingerprint(baseline.fingerprint)}</span>
+        </div>
+      )}
       <svg viewBox={`0 0 1000 ${rows.length * rowHeight + 26}`} role="img">
         {[0, 25, 50, 75, 100].map((percent) => {
           const x = leftWidth + percent * (1000 - leftWidth) / 100;
           return (
             <g key={percent}>
               <line className="grid" x1={x} x2={x} y1={0} y2={rows.length * rowHeight} />
-              <text className="axis" x={x} y={rows.length * rowHeight + 18}>{Math.round(result.maxTime * percent / 100)}</text>
+              <text className="axis" x={x} y={rows.length * rowHeight + 18}>{Math.round(maxTime * percent / 100)}</text>
             </g>
           );
         })}
-        {rows.map(([nodeId, trace], index) => (
+        {rows.map((nodeId, index) => (
           <g key={nodeId}>
             <line className="row-grid" x1={leftWidth} x2="1000" y1={index * rowHeight + 22} y2={index * rowHeight + 22} />
             <text className="wave-name" x={8} y={index * rowHeight + 26}>{nodeId}</text>
-            <SignalPath trace={trace} maxTime={result.maxTime} row={index} />
+            {baseline?.result.waveforms[nodeId] && (
+              <path className="signal signal-baseline" d={buildPath(baseline.result.waveforms[nodeId], maxTime, index)} />
+            )}
+            {result?.waveforms[nodeId] ? (
+              <SignalPath result={result} nodeId={nodeId} trace={result.waveforms[nodeId]} maxTime={maxTime} row={index} />
+            ) : (
+              <text className="axis missing" x={leftWidth + 8} y={index * rowHeight + 26}>当前修订无此节点</text>
+            )}
           </g>
         ))}
       </svg>
     </div>
   );
+}
+
+function SignalPath({ result, nodeId, trace, maxTime, row }: { result: SimulationResult; nodeId: string; trace: Array<{ time: number; value: LogicValue }>; maxTime: number; row: number }) {
+  const current = valueAt(trace, maxTime);
+  const oscillating = result.status === "oscillating" && result.changedNodes.includes(nodeId);
+  return <path className={`signal signal-current signal-${String(current)}${oscillating ? " signal-oscillating" : ""}`} d={buildPath(trace, maxTime, row)} />;
 }

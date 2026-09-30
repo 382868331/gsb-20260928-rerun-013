@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from examples import get_example
 from simulator import simulate
 
@@ -52,3 +54,27 @@ def test_modified_component_delay_cannot_reuse_old_run():
         {"time": event["time"], "node": event["node"], "value": event["value"]}
         for event in second["events"]
     ]
+
+
+def test_fingerprint_tracks_content_but_ignores_canvas_position():
+    example = get_example("combinational")
+    first = simulate(example["circuit"], example["stimulus"], max_time=160)
+
+    moved = deepcopy(example)
+    moved["circuit"]["nodes"][0]["position"] = {"x": 320, "y": 240}
+    moved_result = simulate(moved["circuit"], moved["stimulus"], max_time=160)
+    assert moved_result["fingerprint"] == first["fingerprint"]
+
+    delayed = deepcopy(example)
+    delayed["circuit"]["nodes"][2]["delay"] = 18
+    delayed_result = simulate(delayed["circuit"], delayed["stimulus"], max_time=160)
+    assert delayed_result["fingerprint"] != first["fingerprint"]
+
+    rewired = deepcopy(example)
+    rewired["circuit"]["edges"][0]["targetPort"] = "in2"
+    rewired["circuit"]["edges"][1]["targetPort"] = "in1"
+    rewired_result = simulate(rewired["circuit"], rewired["stimulus"], max_time=160)
+    assert rewired_result["fingerprint"] != first["fingerprint"]
+
+    shorter_window = simulate(example["circuit"], example["stimulus"], max_time=80)
+    assert shorter_window["fingerprint"] != first["fingerprint"]
