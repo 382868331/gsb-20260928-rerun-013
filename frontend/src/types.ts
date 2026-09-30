@@ -41,6 +41,9 @@ export type Diagnostic = {
 };
 
 export type SimulationResult = {
+  circuitFingerprint: string;
+  revision?: number;
+  circuitName?: string;
   status: "stable" | "oscillating" | "truncated";
   maxTime: number;
   processedEvents: number;

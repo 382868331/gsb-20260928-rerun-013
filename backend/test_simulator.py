@@ -1,5 +1,7 @@
+from copy import deepcopy
+
 from examples import get_example
-from simulator import simulate
+from simulator import request_fingerprint, simulate
 
 
 def test_distinct_gate_delays_create_real_timed_events():
@@ -52,3 +54,37 @@ def test_modified_component_delay_cannot_reuse_old_run():
         {"time": event["time"], "node": event["node"], "value": event["value"]}
         for event in second["events"]
     ]
+
+
+def test_fingerprint_tracks_logical_revision_but_not_canvas_position():
+    example = get_example("combinational")
+    moved = deepcopy(example)
+    moved["circuit"]["nodes"][0]["position"] = {"x": 12, "y": 34}
+    delayed = deepcopy(example)
+    delayed["circuit"]["nodes"][2]["delay"] = 18
+
+    assert request_fingerprint(example["circuit"], example["stimulus"], 160) == request_fingerprint(
+        moved["circuit"], moved["stimulus"], 160
+    )
+    assert request_fingerprint(example["circuit"], example["stimulus"], 160) != request_fingerprint(
+        delayed["circuit"], delayed["stimulus"], 160
+    )
+
+
+def test_result_carries_fingerprint_for_loaded_initial_values():
+    example = get_example("latch")
+    fingerprint = request_fingerprint(example["circuit"], example["stimulus"], 180)
+    result = simulate(example["circuit"], example["stimulus"], max_time=180)
+    assert result["circuitFingerprint"] == fingerprint
+
+
+def test_connection_changes_revision_fingerprint_and_diagnostics():
+    example = get_example("faults")
+    original_fingerprint = request_fingerprint(example["circuit"], example["stimulus"], 40)
+    repaired = deepcopy(example)
+    repaired["circuit"]["edges"][1]["targetPort"] = "in2"
+    repaired_fingerprint = request_fingerprint(repaired["circuit"], repaired["stimulus"], 40)
+    result = simulate(repaired["circuit"], repaired["stimulus"], max_time=40)
+
+    assert repaired_fingerprint != original_fingerprint
+    assert "contention" not in {item["severity"] for item in result["diagnostics"]}

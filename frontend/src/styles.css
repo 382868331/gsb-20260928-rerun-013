@@ -121,8 +121,44 @@ svg { width: 100%; min-width: 520px; display: block; }
 .row-grid { stroke: #f1f5f9; }
 .axis, .wave-name { font-size: 12px; fill: #475569; }
 .signal { fill: none; stroke-width: 2.4; }
-.signal-0, .signal-1 { stroke: #0f766e; }
-.signal-x { stroke: #dc2626; stroke-dasharray: 5 4; }
+.signal-current { opacity: 0.95; }
+.signal-baseline { opacity: 0.62; stroke-dasharray: 7 4; }
+.signal-current.signal-0, .signal-current.signal-1 { stroke: #0f766e; }
+.signal-current.signal-x { stroke: #dc2626; }
+.signal-baseline.signal-0, .signal-baseline.signal-1 { stroke: #2563eb; }
+.signal-baseline.signal-x { stroke: #9333ea; }
+.signal-x { stroke-dasharray: 5 4; }
+.wave-legend {
+  display: flex;
+  gap: 14px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid #dbe3ee;
+}
+.legend-current { color: #0f766e; font-weight: 700; }
+.legend-baseline { color: #2563eb; font-weight: 700; }
+.fingerprint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  opacity: 0.75;
+}
+.compare-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+.compare-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  margin: 8px 0;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  font-size: 12px;
+  color: #1e3a8a;
+}
 .log-list { display: grid; gap: 4px; font-size: 12px; max-height: 230px; overflow: auto; }
 .log-list div { padding: 6px 8px; background: white; border-radius: 7px; border: 1px solid #e2e8f0; }
 .log-list span { display: block; color: #64748b; }

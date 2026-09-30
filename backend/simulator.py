@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hashlib
+import json
 
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
@@ -22,6 +24,72 @@ GATE_OUTPUT = "out"
 
 class CircuitError(ValueError):
     pass
+
+
+def canonical_request(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, max_time: int = 160) -> str:
+    nodes, edges = validate_circuit(circuit)
+    stimulus = stimulus or {}
+    initial = stimulus.get("initial", {})
+    events = stimulus.get("events", [])
+    if not isinstance(initial, dict) or not isinstance(events, list):
+        raise CircuitError("stimulus.initial must be an object and stimulus.events must be a list")
+
+    normalized_initial = {
+        str(node_id): normalize_value(value)
+        for node_id, value in sorted(initial.items(), key=lambda item: str(item[0]))
+        if str(node_id) in nodes and nodes[str(node_id)]["type"] == "INPUT"
+    }
+    normalized_events = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise CircuitError("each stimulus event must be an object")
+        node_id = str(event.get("node", ""))
+        if node_id not in nodes or nodes[node_id]["type"] != "INPUT":
+            raise CircuitError(f"stimulus event targets non-input node: {node_id}")
+        time = int(event.get("time", 0))
+        if time < 0:
+            raise CircuitError("stimulus event time cannot be negative")
+        normalized_events.append({
+            "node": node_id,
+            "time": time,
+            "value": normalize_value(event.get("value")),
+        })
+    normalized_events.sort(key=lambda event: (event["time"], event["node"]))
+
+    normalized_circuit = {
+        "nodes": [
+            {
+                "id": node_id,
+                "type": node["type"],
+                "label": node["label"],
+                "delay": node["delay"],
+                "initial": node["initial"],
+            }
+            for node_id, node in sorted(nodes.items())
+        ],
+        "edges": sorted(
+            [
+                {
+                    "source": edge["source"],
+                    "target": edge["target"],
+                    "targetPort": edge["targetPort"],
+                }
+                for edge in edges
+            ],
+            key=lambda edge: (edge["source"], edge["target"], edge["targetPort"]),
+        ),
+    }
+    normalized_stimulus = {"initial": normalized_initial, "events": normalized_events}
+    return json.dumps(
+        {"circuit": normalized_circuit, "stimulus": normalized_stimulus, "maxTime": int(max_time)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def request_fingerprint(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, max_time: int = 160) -> str:
+    return hashlib.sha256(canonical_request(circuit, stimulus, max_time).encode("utf-8")).hexdigest()
 
 
 @dataclass(order=True)
@@ -141,6 +209,7 @@ def evaluate_gate(node: dict[str, Any], input_values: dict[str, Any]) -> Any:
 
 def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *, max_time: int = 160, max_events: int = 20000) -> dict[str, Any]:
     nodes, edges = validate_circuit(circuit)
+    fingerprint = request_fingerprint(circuit, stimulus, max_time)
     stimulus = stimulus or {}
     initial_inputs = stimulus.get("initial", {})
     events = stimulus.get("events", [])
@@ -292,6 +361,7 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
         status = "truncated"
 
     return {
+        "circuitFingerprint": fingerprint,
         "status": status,
         "maxTime": max_time,
         "processedEvents": processed,

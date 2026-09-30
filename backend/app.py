@@ -70,7 +70,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if parts == ["api", "simulate"]:
                 max_time = int(payload.get("maxTime", 160))
-                self._send(200, simulate(payload["circuit"], payload.get("stimulus"), max_time=max_time))
+                result = simulate(payload["circuit"], payload.get("stimulus"), max_time=max_time)
+                result["revision"] = payload.get("revision")
+                result["circuitName"] = str(payload.get("circuitName") or "未命名电路")
+                self._send(200, result)
             elif parts == ["api", "circuits"]:
                 validate_circuit(payload["circuit"])
                 self._send(201, STORE.save(payload))

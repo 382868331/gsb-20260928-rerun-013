@@ -13,10 +13,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   examples: () => request<{ examples: ExampleSummary[] }>("/api/examples"),
   example: (id: string) => request<{ circuit: Circuit; stimulus: Stimulus; name: string }>(`/api/examples/${id}`),
-  simulate: (circuit: Circuit, stimulus: Stimulus, maxTime: number) =>
+  simulate: (circuit: Circuit, stimulus: Stimulus, maxTime: number, revision: number, circuitName: string) =>
     request<SimulationResult>("/api/simulate", {
       method: "POST",
-      body: JSON.stringify({ circuit, stimulus, maxTime }),
+      body: JSON.stringify({ circuit, stimulus, maxTime, revision, circuitName }),
     }),
   saved: () => request<{ circuits: SavedSummary[] }>("/api/circuits"),
   load: (id: string) => request<SavedCircuit>(`/api/circuits/${id}`),
