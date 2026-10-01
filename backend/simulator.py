@@ -25,17 +25,11 @@ class CircuitError(ValueError):
     pass
 
 
-def circuit_fingerprint(
-    nodes: dict[str, dict[str, Any]],
-    edges: list[dict[str, str]],
-    events: list[tuple[int, str, Any]],
-    max_time: int,
-) -> str:
-    """Return a canonical content fingerprint for a simulated revision.
+def _canonical(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
-    Node positions intentionally do not participate: moving a gate on the
-    canvas must not invalidate or misattribute simulation results.
-    """
+
+def circuit_fingerprint(nodes: dict[str, dict[str, Any]], edges: list[dict[str, str]]) -> str:
     canonical = {
         "edges": [
             {"source": edge["source"], "target": edge["target"], "targetPort": edge["targetPort"]}
@@ -54,13 +48,36 @@ def circuit_fingerprint(
             }
             for node in sorted(nodes.values(), key=lambda item: item["id"])
         ],
+    }
+    return _canonical(canonical)
+
+
+def stimulus_fingerprint(
+    initial_inputs: dict[str, Any],
+    events: list[tuple[int, str, Any]],
+) -> str:
+    canonical = {
+        "initial": dict(sorted(initial_inputs.items())),
         "events": [
             {"time": time, "node": node_id, "value": value}
             for time, node_id, value in sorted(events, key=lambda item: (item[0], item[1], str(item[2])))
         ],
-        "maxTime": int(max_time),
     }
-    return json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _canonical(canonical)
+
+
+def simulation_fingerprint(
+    nodes: dict[str, dict[str, Any]],
+    edges: list[dict[str, str]],
+    initial_inputs: dict[str, Any],
+    events: list[tuple[int, str, Any]],
+    max_time: int,
+) -> str:
+    return _canonical({
+        "circuit": circuit_fingerprint(nodes, edges),
+        "stimulus": stimulus_fingerprint(initial_inputs, events),
+        "maxTime": int(max_time),
+    })
 
 
 @dataclass(order=True)
@@ -186,6 +203,7 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
     if not isinstance(initial_inputs, dict) or not isinstance(events, list):
         raise CircuitError("stimulus.initial must be an object and stimulus.events must be a list")
 
+    original_initial = {node_id: node["initial"] for node_id, node in nodes.items()}
     for node_id, node in nodes.items():
         if node["type"] == "INPUT" and node_id in initial_inputs:
             node["initial"] = normalize_value(initial_inputs[node_id])
@@ -293,7 +311,15 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
     record_disconnected_inputs(0)
     for node_id, node in nodes.items():
         if node["type"] != "INPUT":
-            push(node["delay"], "gate", node_id, {"cause": "initialization"})
+            push(
+                node["delay"],
+                "gate",
+                node_id,
+                {
+                    "cause": "initialization",
+                    "initial_value": evaluate_gate(node, input_ports[node_id]),
+                },
+            )
     for time, node_id, value in scheduled_input_events:
         push(time, "input", node_id, {"value": value})
 
@@ -318,7 +344,11 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
 
         node_id = pending.key
         node = nodes[node_id]
-        new_value = evaluate_gate(node, input_ports[node_id])
+        new_value = (
+            pending.payload["initial_value"]
+            if pending.payload.get("cause") == "initialization"
+            else evaluate_gate(node, input_ports[node_id])
+        )
         if states[node_id] != new_value:
             append_signal(node_id, pending.time, new_value, f"{node['type']} 传播延迟 {node['delay']}")
             propagate_output(node_id, pending.time, "gate-output")
@@ -331,7 +361,9 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
         status = "truncated"
 
     return {
-        "fingerprint": circuit_fingerprint(nodes, edges, scheduled_input_events, max_time),
+        "fingerprint": simulation_fingerprint(nodes, edges, initial_inputs, scheduled_input_events, max_time),
+        "circuitFingerprint": circuit_fingerprint({node_id: {**node, "initial": original_initial[node_id]} for node_id, node in nodes.items()}, edges),
+        "stimulusFingerprint": stimulus_fingerprint(initial_inputs, scheduled_input_events),
         "status": status,
         "maxTime": max_time,
         "processedEvents": processed,

@@ -13,7 +13,7 @@ import {
 } from "@xyflow/react";
 import { GitCompareArrows, Redo2, Trash2, Undo2 } from "lucide-react";
 import { api } from "./api";
-import { circuitFingerprint, shortFingerprint } from "./fingerprint";
+import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
 import { nodeTypes } from "./GateNode";
 import { WaveformPanel } from "./WaveformPanel";
 import type {
@@ -27,18 +27,26 @@ import type {
   SimulationResult,
   Stimulus,
   StimulusEvent,
+  StimulusPlan,
 } from "./types";
 
 const gateTypes: GateType[] = ["INPUT", "NOT", "BUFFER", "AND", "OR", "XOR", "NAND", "NOR", "XNOR"];
 const nodeCounter = { value: 0 };
 
-type LoadedPayload = { name?: string; circuit: Circuit; stimulus?: Stimulus };
+type LoadedPayload = {
+  name?: string;
+  circuit: Circuit;
+  stimulus?: Stimulus;
+  plans?: StimulusPlan[];
+  activePlanId?: string;
+};
 type Baseline = { label: string; fingerprint: string; result: SimulationResult };
+type RunRecord = { fingerprint: string; status: "running" | "ready" | "error"; result?: SimulationResult; error?: string };
 type Snapshot = {
   nodes: Node[];
   edges: Edge[];
-  events: StimulusEvent[];
-  initial: Record<string, LogicValue>;
+  plans: StimulusPlan[];
+  activePlanId: string;
 };
 
 function toCircuit(nodes: Node[], edges: Edge[]): Circuit {
@@ -80,12 +88,31 @@ function toFlow(circuit: Circuit) {
   };
 }
 
-function initialOverrides(nodes: Node[], events: StimulusEvent[]): Stimulus {
-  const initial: Record<string, LogicValue> = {};
-  for (const node of nodes) {
-    if (node.data.type === "INPUT") initial[node.id] = (node.data.initial as LogicValue) ?? 0;
+function planToStimulus(plan: StimulusPlan): Stimulus {
+  return { initial: plan.initial ?? {}, events: plan.events };
+}
+
+function normalizePlans(payload: LoadedPayload): { plans: StimulusPlan[]; activePlanId: string } {
+  if (payload.plans?.length) {
+    const plans = payload.plans.map((plan, index) => ({
+      id: plan.id || `plan-${index + 1}`,
+      name: plan.name || `方案 ${index + 1}`,
+      version: Number(plan.version || 1),
+      initial: plan.initial ?? {},
+      events: plan.events ?? [],
+    }));
+    return { plans, activePlanId: plans.some((plan) => plan.id === payload.activePlanId) ? payload.activePlanId! : plans[0].id };
   }
-  return { initial, events };
+  return {
+    plans: [{
+      id: "plan-1",
+      name: "方案 A",
+      version: 1,
+      initial: payload.stimulus?.initial ?? {},
+      events: payload.stimulus?.events ?? [],
+    }],
+    activePlanId: "plan-1",
+  };
 }
 
 export function App() {
@@ -93,13 +120,12 @@ export function App() {
   const [savedList, setSavedList] = useState<SavedSummary[]>([]);
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
-  const [stimulusEvents, setStimulusEvents] = useState<StimulusEvent[]>([]);
-  const [initialOverridesState, setInitialOverridesState] = useState<Record<string, LogicValue>>({});
+  const [plans, setPlans] = useState<StimulusPlan[]>([]);
+  const [activePlanId, setActivePlanId] = useState("plan-1");
+  const [comparePlanId, setComparePlanId] = useState<string>("");
   const [maxTime, setMaxTime] = useState(160);
-  const [result, setResult] = useState<SimulationResult | null>(null);
+  const [runs, setRuns] = useState<Record<string, RunRecord>>({});
   const [baseline, setBaseline] = useState<Baseline | null>(null);
-  const [error, setError] = useState("");
-  const [running, setRunning] = useState(false);
   const [circuitName, setCircuitName] = useState("未命名电路");
   const [savedId, setSavedId] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
@@ -107,27 +133,36 @@ export function App() {
   const historyRef = useRef<Snapshot[]>([]);
   const futureRef = useRef<Snapshot[]>([]);
   const [historyVersion, setHistoryVersion] = useState(0);
-  const runTokenRef = useRef(0);
   const loadTokenRef = useRef(0);
-  const autoRunRef = useRef<{ token: number; stimulus: Stimulus } | null>(null);
+  const autoRunRef = useRef<{ token: number; planId: string } | null>(null);
 
   const circuit = useMemo(() => toCircuit(nodes, edges), [nodes, edges]);
-  const stimulus: Stimulus = useMemo(
-    () => ({ initial: initialOverridesState, events: stimulusEvents }),
-    [initialOverridesState, stimulusEvents],
+  const activePlan = useMemo(
+    () => plans.find((plan) => plan.id === activePlanId) ?? plans[0] ?? null,
+    [plans, activePlanId],
   );
+  const comparePlan = useMemo(
+    () => plans.find((plan) => plan.id === comparePlanId) ?? null,
+    [plans, comparePlanId],
+  );
+  const stimulus: Stimulus = useMemo(() => activePlan ? planToStimulus(activePlan) : { events: [] }, [activePlan]);
   const inputs = useMemo(() => circuit.nodes.filter((node) => node.type === "INPUT"), [circuit.nodes]);
   const fingerprint = useMemo(
-    () => (nodes.length ? circuitFingerprint(circuit, stimulus, maxTime) : ""),
-    [circuit, stimulus, maxTime, nodes.length],
+    () => (nodes.length && activePlan ? simulationFingerprint(circuit, stimulus, maxTime) : ""),
+    [activePlan, circuit, stimulus, maxTime, nodes.length],
   );
+  const circuitFingerprintValue = useMemo(() => (nodes.length ? circuitFingerprint(circuit) : ""), [circuit, nodes.length]);
+  const currentRun = fingerprint ? runs[fingerprint] : undefined;
+  const result = currentRun?.status === "ready" ? currentRun.result ?? null : null;
+  const running = currentRun?.status === "running";
+  const currentError = currentRun?.status === "error" ? currentRun.error ?? "" : "";
 
   const refreshSaved = useCallback(() => {
     api.saved().then((payload) => setSavedList(payload.circuits)).catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    api.examples().then((payload) => setExamples(payload.examples)).catch((reason) => setError(reason.message));
+    api.examples().then((payload) => setExamples(payload.examples)).catch(() => undefined);
     refreshSaved();
   }, [refreshSaved]);
 
@@ -136,9 +171,9 @@ export function App() {
   const snapshot = useCallback((): Snapshot => ({
     nodes,
     edges,
-    events: stimulusEvents,
-    initial: { ...initialOverridesState },
-  }), [nodes, edges, stimulusEvents, initialOverridesState]);
+    plans: plans.map((plan) => ({ ...plan, initial: { ...plan.initial }, events: [...plan.events] })),
+    activePlanId,
+  }), [nodes, edges, plans, activePlanId]);
 
   const commitHistory = useCallback(() => {
     historyRef.current.push(snapshot());
@@ -149,14 +184,14 @@ export function App() {
 
   const invalidate = useCallback(() => {
     setRevision((value) => value + 1);
-    setResult(null);
   }, []);
 
   const restoreSnapshot = useCallback((next: Snapshot) => {
     setNodes(next.nodes);
     setEdges(next.edges);
-    setStimulusEvents(next.events);
-    setInitialOverridesState(next.initial);
+    setPlans(next.plans);
+    setActivePlanId(next.activePlanId);
+    setComparePlanId("");
     setSavedId(undefined);
     invalidate();
   }, [setNodes, setEdges, invalidate]);
@@ -190,52 +225,59 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [undo, redo]);
 
-  const runCircuit = useCallback(async (explicit?: { circuit: Circuit; stimulus: Stimulus; maxTime: number }) => {
-    const requestCircuit = explicit?.circuit ?? circuit;
-    if (!requestCircuit.nodes.length) return;
-    const requestStimulus = explicit?.stimulus ?? stimulus;
-    const requestMaxTime = explicit?.maxTime ?? maxTime;
-    const expectedFingerprint = circuitFingerprint(requestCircuit, requestStimulus, requestMaxTime);
-    const token = runTokenRef.current + 1;
-    runTokenRef.current = token;
-    setRunning(true);
-    setError("");
-    setResult(null);
+  const runCircuit = useCallback(async (targetPlan?: StimulusPlan) => {
+    const requestPlan = targetPlan ?? activePlan;
+    if (!circuit.nodes.length || !requestPlan) return;
+    const requestStimulus = planToStimulus(requestPlan);
+    const expectedFingerprint = simulationFingerprint(circuit, requestStimulus, maxTime);
+    const expectedCircuit = circuitFingerprint(circuit);
+    const expectedStimulus = stimulusFingerprint(requestStimulus);
+    setRuns((current) => ({
+      ...current,
+      [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "running" },
+    }));
     try {
-      const payload = await api.simulate(requestCircuit, requestStimulus, requestMaxTime);
-      if (runTokenRef.current !== token) return;
-      if (payload.fingerprint !== expectedFingerprint) {
-        setError("仿真结果与当前电路版本不一致，已丢弃。");
+      const payload = await api.simulate(circuit, requestStimulus, maxTime);
+      const accepted = payload.fingerprint === expectedFingerprint
+        && payload.circuitFingerprint === expectedCircuit
+        && payload.stimulusFingerprint === expectedStimulus;
+      if (!accepted) {
+        setRuns((current) => ({
+          ...current,
+          [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "error", error: "仿真结果与当前电路/方案组合不一致，已丢弃。" },
+        }));
         return;
       }
-      setResult(payload);
+      setRuns((current) => ({
+        ...current,
+        [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "ready", result: payload },
+      }));
     } catch (reason) {
-      if (runTokenRef.current === token) setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      if (runTokenRef.current === token) setRunning(false);
+      setRuns((current) => ({
+        ...current,
+        [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "error", error: reason instanceof Error ? reason.message : String(reason) },
+      }));
     }
-  }, [circuit, stimulus, maxTime]);
+  }, [activePlan, circuit, maxTime]);
 
   const applyPayload = useCallback((payload: LoadedPayload, id: string | undefined, autoRun: boolean, expectedToken?: number) => {
     if (expectedToken !== undefined && expectedToken !== loadTokenRef.current) return;
     if (!payload.circuit?.nodes?.length) {
-      setError("载入的电路为空，已取消运行。");
       return;
     }
     const loadToken = expectedToken ?? loadTokenRef.current + 1;
     loadTokenRef.current = loadToken;
-    runTokenRef.current += 1;
     const flow = toFlow(payload.circuit);
-    const loadedStimulus: Stimulus = { initial: {}, events: payload.stimulus?.events ?? [], ...payload.stimulus };
+    const loadedPlans = normalizePlans(payload);
     setNodes(flow.nodes);
     setEdges(flow.edges);
-    setStimulusEvents(loadedStimulus.events ?? []);
-    setInitialOverridesState(loadedStimulus.initial ?? {});
+    setPlans(loadedPlans.plans);
+    setActivePlanId(loadedPlans.activePlanId);
+    setComparePlanId("");
     setCircuitName(payload.name ?? "未命名电路");
     setSavedId(id);
-    setResult(null);
     setBaseline(null);
-    setError("");
+    setRuns({});
     setRevision((value) => value + 1);
     setReady(true);
     historyRef.current = [];
@@ -247,22 +289,20 @@ export function App() {
     }, 0);
     nodeCounter.value = Math.max(nodeCounter.value, maxCounter);
     if (autoRun) {
-      autoRunRef.current = { token: loadToken, stimulus: loadedStimulus };
+      const loadedPlan = loadedPlans.plans.find((plan) => plan.id === loadedPlans.activePlanId)!;
+      autoRunRef.current = { token: loadToken, planId: loadedPlan.id };
     }
   }, [bumpHistory, setEdges, setNodes]);
 
   const applyLoadFailure = (token: number, reason: unknown) => {
     if (loadTokenRef.current === token) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setRunning(false);
+      console.error(reason);
     }
   };
 
   const loadExample = useCallback(async (id: string) => {
     const token = loadTokenRef.current + 1;
     loadTokenRef.current = token;
-    setResult(null);
-    setRunning(true);
     try {
       applyPayload(await api.example(id), undefined, true, token);
     } catch (reason) {
@@ -273,8 +313,6 @@ export function App() {
   const loadSaved = useCallback(async (id: string) => {
     const token = loadTokenRef.current + 1;
     loadTokenRef.current = token;
-    setResult(null);
-    setRunning(true);
     try {
       applyPayload(await api.load(id), id, true, token);
     } catch (reason) {
@@ -290,8 +328,7 @@ export function App() {
       if (!cancelled) applyPayload(example, undefined, true, token);
     }).catch((reason) => {
       if (!cancelled && loadTokenRef.current === token) {
-        setError(reason instanceof Error ? reason.message : String(reason));
-        setRunning(false);
+        console.error(reason);
       }
     });
     return () => { cancelled = true; };
@@ -301,7 +338,8 @@ export function App() {
     const pending = autoRunRef.current;
     if (!pending || pending.token !== loadTokenRef.current || !nodes.length) return;
     autoRunRef.current = null;
-    void runCircuit({ circuit: toCircuit(nodes, edges), stimulus: pending.stimulus, maxTime });
+    const loadedPlan = plans.find((plan) => plan.id === pending.planId) ?? plans[0];
+    if (loadedPlan) void runCircuit(loadedPlan);
   });
 
   const onNodesChange = useCallback((changes: NodeChange<Node>[]) => {
@@ -347,31 +385,76 @@ export function App() {
   };
 
   const save = async () => {
-    const saved = await api.save({ name: circuitName, circuit, stimulus: { initial: initialOverridesState, events: stimulusEvents } }, savedId);
+    if (!activePlan) return;
+    const saved = await api.save({
+      name: circuitName,
+      circuit,
+      stimulus: planToStimulus(activePlan),
+      plans,
+      activePlanId,
+    }, savedId);
     setSavedId(saved.id);
     setCircuitName(saved.name);
     refreshSaved();
   };
 
+  const editActivePlan = (updater: (plan: StimulusPlan) => StimulusPlan) => {
+    if (!activePlan) return;
+    commitHistory();
+    invalidate();
+    setPlans((current) => current.map((plan) =>
+      plan.id === activePlan.id ? { ...updater(plan), version: plan.version + 1 } : plan,
+    ));
+  };
+
+  const renameActivePlan = (name: string) => {
+    if (!activePlan) return;
+    setPlans((current) => current.map((plan) => plan.id === activePlan.id ? { ...plan, name } : plan));
+  };
+
   const addStimulus = () => {
     const firstInput = inputs[0]?.id;
     if (!firstInput) return;
-    commitHistory();
-    invalidate();
-    setStimulusEvents((current) => [...current, { time: current.at(-1)?.time ? current.at(-1)!.time + 20 : 20, node: firstInput, value: 1 }]);
+    editActivePlan((plan) => ({
+      ...plan,
+      events: [...plan.events, { time: plan.events.at(-1)?.time ? plan.events.at(-1)!.time + 20 : 20, node: firstInput, value: 1 as LogicValue }],
+    }));
   };
 
-  const updateStimulus = (updater: (current: StimulusEvent[]) => StimulusEvent[]) => {
-    commitHistory();
-    invalidate();
-    setStimulusEvents(updater);
-  };
+  const updateStimulus = (updater: (current: StimulusEvent[]) => StimulusEvent[]) =>
+    editActivePlan((plan) => ({ ...plan, events: updater(plan.events) }));
 
   const updateInitial = (nodeId: string, value: LogicValue) => {
+    editActivePlan((plan) => ({ ...plan, initial: { ...plan.initial, [nodeId]: value } }));
+  };
+
+  const duplicatePlan = () => {
+    if (!activePlan) return;
     commitHistory();
+    const copied: StimulusPlan = {
+      ...activePlan,
+      id: `plan-${Date.now()}`,
+      name: `${activePlan.name} 副本`,
+      version: 1,
+      initial: { ...activePlan.initial },
+      events: [...activePlan.events],
+    };
+    setPlans((current) => [...current, copied]);
+    setActivePlanId(copied.id);
+    setComparePlanId(activePlan.id);
     invalidate();
-    setInitialOverridesState((current) => ({ ...current, [nodeId]: value }));
-    setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, initial: value } } : node));
+  };
+
+  const selectPlan = (id: string) => {
+    setBaseline(null);
+    setActivePlanId(id);
+    setComparePlanId((current) => (current === id ? "" : current));
+  };
+
+  const runComparedPlans = async () => {
+    if (!activePlan) return;
+    await runCircuit(activePlan);
+    if (comparePlan) await runCircuit(comparePlan);
   };
 
   const disconnectSelected = () => {
@@ -386,6 +469,15 @@ export function App() {
   }, [result, revision]);
 
   const resultMatchesCurrent = result?.fingerprint === fingerprint;
+  const resultForPlan = (plan: StimulusPlan) => {
+    const key = simulationFingerprint(circuit, planToStimulus(plan), maxTime);
+    const record = runs[key];
+    return record?.status === "ready" ? record.result ?? null : null;
+  };
+  const compareResult = comparePlan ? resultForPlan(comparePlan) : null;
+  const waveformBaseline = comparePlan && compareResult
+    ? { label: `${comparePlan.name} v${comparePlan.version}`, fingerprint: compareResult.fingerprint, result: compareResult }
+    : baseline;
   const canUndo = historyRef.current.length > 0;
   const canRedo = futureRef.current.length > 0;
 
@@ -401,7 +493,7 @@ export function App() {
             <option value="">载入内置示例</option>
             {examples.map((example) => <option key={example.id} value={example.id}>{example.name}</option>)}
           </select>
-          <button onClick={() => runCircuit()} disabled={running || !nodes.length}>{running ? "仿真中…" : "运行当前版本"}</button>
+          <button onClick={() => runComparedPlans()} disabled={running || !nodes.length || !activePlan}>{running ? "计算中…" : "运行方案"}</button>
         </div>
       </header>
 
@@ -419,33 +511,44 @@ export function App() {
             </div>
           ) : <p className="hint">选择元件后可改名称、传播延迟和初值。</p>}
 
-          <h2>输入初值</h2>
-          <div className="initial-grid">
-            {inputs.length ? inputs.map((input) => (
-              <label key={input.id}>{input.id}
-                <select value={String(initialOverridesState[input.id] ?? input.initial ?? 0)} onChange={(e) => updateInitial(input.id, e.target.value === "x" ? "x" : Number(e.target.value) as LogicValue)}>
-                  <option value="0">0</option><option value="1">1</option><option value="x">X</option>
-                </select>
-              </label>
-            )) : <p className="hint">添加 INPUT 元件。</p>}
-          </div>
-
-          <h2>输入事件</h2>
-          <div className="events-editor">
-            {stimulusEvents.map((event, index) => (
-              <div className="event-row" key={`${index}-${event.node}`}>
-                <input type="number" value={event.time} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, time: Number(e.target.value) } : item))} />
-                <select value={event.node} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, node: e.target.value } : item))}>
-                  {inputs.map((input) => <option key={input.id} value={input.id}>{input.id}</option>)}
-                </select>
-                <select value={String(event.value)} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, value: e.target.value === "x" ? "x" : Number(e.target.value) as LogicValue } : item))}>
-                  <option value="0">0</option><option value="1">1</option><option value="x">X</option>
-                </select>
-                <button onClick={() => updateStimulus((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button>
+          <h2>激励方案</h2>
+          {activePlan && (
+            <div className="plan-editor">
+              <select value={activePlanId} onChange={(event) => selectPlan(event.target.value)}>
+                {plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name} v{plan.version}</option>)}
+              </select>
+              <input value={activePlan.name} onChange={(event) => renameActivePlan(event.target.value)} />
+              <div className="plan-actions">
+                <button onClick={duplicatePlan}>复制方案</button>
               </div>
-            ))}
-            <button onClick={addStimulus} disabled={!inputs.length}>添加输入变化</button>
-          </div>
+              <h3>输入初值（t=0 生效）</h3>
+              <div className="initial-grid">
+                {inputs.length ? inputs.map((input) => (
+                  <label key={input.id}>{input.id}
+                    <select value={String(activePlan.initial?.[input.id] ?? input.initial ?? 0)} onChange={(e) => updateInitial(input.id, e.target.value === "x" ? "x" : Number(e.target.value) as LogicValue)}>
+                      <option value="0">0</option><option value="1">1</option><option value="x">X</option>
+                    </select>
+                  </label>
+                )) : <p className="hint">添加 INPUT 元件。</p>}
+              </div>
+              <h3>跳变（同一时刻可多选输入同时变化）</h3>
+              <div className="events-editor">
+                {activePlan.events.map((event, index) => (
+                  <div className="event-row" key={`${index}-${event.node}`}>
+                    <input type="number" value={event.time} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, time: Number(e.target.value) } : item))} />
+                    <select value={event.node} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, node: e.target.value } : item))}>
+                      {inputs.map((input) => <option key={input.id} value={input.id}>{input.id}</option>)}
+                    </select>
+                    <select value={String(event.value)} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, value: e.target.value === "x" ? "x" : Number(e.target.value) as LogicValue } : item))}>
+                      <option value="0">0</option><option value="1">1</option><option value="x">X</option>
+                    </select>
+                    <button onClick={() => updateStimulus((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button>
+                  </div>
+                ))}
+                <button onClick={addStimulus} disabled={!inputs.length}>添加跳变</button>
+              </div>
+            </div>
+          )}
 
           <h2>保存 / 读取</h2>
           <div className="save-row">
@@ -463,7 +566,7 @@ export function App() {
             <button onClick={disconnectSelected}>断开选中连线</button>
             <span className="revision">
               修订 #{revision} · 指纹 {fingerprint ? shortFingerprint(fingerprint) : "—"} · 
-              {running ? "计算中" : result ? (resultMatchesCurrent ? "结果属于当前电路" : "结果版本不符，已隔离") : "尚未运行"}
+              {running ? "计算中" : currentRun?.status === "error" ? "结果被拒绝" : result ? "结果属于当前电路/方案" : "尚未运行"}
             </span>
           </div>
           <ReactFlow
@@ -483,17 +586,25 @@ export function App() {
 
         <aside className="results">
           <h2>仿真状态</h2>
-          {error && <div className="error">{error}</div>}
+          {currentError && <div className="error">{currentError}</div>}
           {!ready && <div className="empty-panel">正在载入首个示例，空画布不会被提交。</div>}
-          {result ? <StatusCard result={result} current={resultMatchesCurrent} /> : ready ? <div className="empty-panel">尚未运行。</div> : null}
-          <h2>修订波形对照</h2>
+          {result ? <StatusCard result={result} current={resultMatchesCurrent} />
+            : running ? <div className="empty-panel">当前电路/方案组合计算中，旧结果不会写入诊断、事件或稳定状态。</div>
+            : ready ? <div className="empty-panel">尚未运行。</div> : null}
+          <h2>方案 / 修订波形对照</h2>
           <div className="compare-controls">
-            <button onClick={keepBaseline} disabled={!result || !resultMatchesCurrent}><GitCompareArrows size={14} /> 保存当前结果为对照基线</button>
-            <button onClick={() => setBaseline(null)} disabled={!baseline}>清除基线</button>
+            <select value={comparePlanId} onChange={(event) => setComparePlanId(event.target.value)}>
+              <option value="">不比较其他方案</option>
+              {plans.filter((plan) => plan.id !== activePlanId).map((plan) => <option key={plan.id} value={plan.id}>{plan.name} v{plan.version}</option>)}
+            </select>
+            <button onClick={keepBaseline} disabled={!result || !resultMatchesCurrent}><GitCompareArrows size={14} /> 锁定电路修订基线</button>
+            <button onClick={() => setBaseline(null)} disabled={!baseline}>清除修订基线</button>
           </div>
-          {baseline && <div className="baseline-meta">基线：{baseline.label}（{shortFingerprint(baseline.fingerprint)}）</div>}
-          <WaveformPanel result={resultMatchesCurrent ? result : null} baseline={baseline} />
-          <RevisionDiff current={resultMatchesCurrent ? result : null} baseline={baseline} />
+          {comparePlan && !compareResult && <div className="baseline-meta">{comparePlan.name} 尚未在当前电路修订上运行；点击“运行方案”。</div>}
+          {waveformBaseline && <div className="baseline-meta">虚线基线：{waveformBaseline.label}（{shortFingerprint(waveformBaseline.fingerprint)}）</div>}
+          <WaveformPanel result={result} baseline={waveformBaseline} />
+          <PlanDiff current={result} currentPlan={activePlan} compare={compareResult} comparePlan={comparePlan} inputIds={inputs.map((input) => input.id)} />
+          {!comparePlan && <RevisionDiff current={result} baseline={baseline} />}
           <h2>实际事件</h2>
           <div className="log-list">{result?.events.map((event, index) => <div key={index}><b>t={event.time}</b> {event.node} → {String(event.value)} <span>{event.reason}</span></div>)}</div>
           <h2>诊断</h2>
@@ -527,6 +638,72 @@ function firstChangeTimes(result: SimulationResult): Record<string, Record<strin
     }
   }
   return times;
+}
+
+function valueAtTime(trace: Array<{ time: number; value: LogicValue }>, time: number): LogicValue {
+  let value: LogicValue = trace[0]?.value ?? "x";
+  for (const point of trace) {
+    if (point.time <= time) value = point.value;
+  }
+  return value;
+}
+
+function PlanDiff({
+  current,
+  currentPlan,
+  compare,
+  comparePlan,
+  inputIds,
+}: {
+  current: SimulationResult | null;
+  currentPlan: StimulusPlan | null;
+  compare: SimulationResult | null;
+  comparePlan: StimulusPlan | null;
+  inputIds: string[];
+}) {
+  if (!currentPlan || !comparePlan) return null;
+  if (!current || !compare) {
+    return <div className="empty-panel">运行两个方案后，显示首次输出差异及其之前的输入变化。</div>;
+  }
+  const outputIds = Array.from(new Set([
+    ...Object.keys(current.waveforms).filter((nodeId) => !inputIds.includes(nodeId)),
+    ...Object.keys(compare.waveforms).filter((nodeId) => !inputIds.includes(nodeId)),
+  ])).sort();
+  const times = Array.from(new Set([
+    ...Object.values(current.waveforms).flatMap((trace) => trace.map((point) => point.time)),
+    ...Object.values(compare.waveforms).flatMap((trace) => trace.map((point) => point.time)),
+  ])).sort((left, right) => left - right);
+  const first = times.flatMap((time) => outputIds.map((nodeId) => ({ time, nodeId })))
+    .find(({ time, nodeId }) =>
+      String(valueAtTime(current.waveforms[nodeId] ?? [{ time: 0, value: "x" }], time))
+      !== String(valueAtTime(compare.waveforms[nodeId] ?? [{ time: 0, value: "x" }], time)));
+  const relevantInputs = Array.from(new Set([
+    ...(first ? inputIds.filter((nodeId) => String(currentPlan.initial?.[nodeId] ?? "x") !== String(comparePlan.initial?.[nodeId] ?? "x")) : []),
+    ...currentPlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
+    ...comparePlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
+  ])).sort();
+  return (
+    <div className="revision-diff">
+      <div className={first ? "contention" : "ok"}>
+        {first ? `首次输出差异：t=${first.time}，节点 ${first.nodeId}` : "观测窗口内输出没有差异"}
+      </div>
+      <table>
+        <thead><tr><th>t</th><th>输入</th><th>{currentPlan.name}</th><th>{comparePlan.name}</th></tr></thead>
+        <tbody>
+          {relevantInputs.map((nodeId) => {
+            const left = currentPlan.events.filter((event) => event.node === nodeId && (!first || event.time <= first.time));
+            const right = comparePlan.events.filter((event) => event.node === nodeId && (!first || event.time <= first.time));
+            const leftInitial = currentPlan.initial?.[nodeId] !== undefined ? `0:${String(currentPlan.initial![nodeId])}` : "";
+            const rightInitial = comparePlan.initial?.[nodeId] !== undefined ? `0:${String(comparePlan.initial![nodeId])}` : "";
+            const leftText = [leftInitial, ...left.map((event) => `${event.time}:${String(event.value)}`)].filter(Boolean).join(" → ") || "—";
+            const rightText = [rightInitial, ...right.map((event) => `${event.time}:${String(event.value)}`)].filter(Boolean).join(" → ") || "—";
+            const timesForInput = Array.from(new Set([0, ...left.map((event) => event.time), ...right.map((event) => event.time)]));
+            return <tr key={nodeId}><td>{timesForInput.join(", ")}</td><td>{nodeId}</td><td>{leftText}</td><td>{rightText}</td></tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function RevisionDiff({ current, baseline }: { current: SimulationResult | null; baseline: Baseline | null }) {

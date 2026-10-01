@@ -1,7 +1,7 @@
 from copy import deepcopy
 
 from examples import get_example
-from simulator import simulate
+from simulator import circuit_fingerprint, simulate, stimulus_fingerprint, validate_circuit
 
 
 def test_distinct_gate_delays_create_real_timed_events():
@@ -78,3 +78,64 @@ def test_fingerprint_tracks_content_but_ignores_canvas_position():
 
     shorter_window = simulate(example["circuit"], example["stimulus"], max_time=80)
     assert shorter_window["fingerprint"] != first["fingerprint"]
+
+
+def test_simultaneous_input_changes_can_create_short_gate_pulse():
+    circuit = {
+        "nodes": [
+            {"id": "A", "type": "INPUT", "label": "A", "delay": 0, "initial": 0},
+            {"id": "B", "type": "INPUT", "label": "B", "delay": 0, "initial": 0},
+            {"id": "and1", "type": "NAND", "label": "NAND1", "delay": 5, "initial": 1},
+            {"id": "and2", "type": "NAND", "label": "NAND2", "delay": 15, "initial": 1},
+            {"id": "pulse", "type": "XOR", "label": "XOR", "delay": 5, "initial": "x"},
+        ],
+        "edges": [
+            {"source": "A", "target": "and1", "targetPort": "in1"},
+            {"source": "B", "target": "and1", "targetPort": "in2"},
+            {"source": "A", "target": "and2", "targetPort": "in1"},
+            {"source": "B", "target": "and2", "targetPort": "in2"},
+            {"source": "and1", "target": "pulse", "targetPort": "in1"},
+            {"source": "and2", "target": "pulse", "targetPort": "in2"},
+        ],
+    }
+    stimulus = {
+        "events": [
+            {"time": 10, "node": "A", "value": 1},
+            {"time": 10, "node": "B", "value": 1},
+            {"time": 10, "node": "A", "value": 1},
+        ]
+    }
+    result = simulate(circuit, stimulus, max_time=60)
+    changes = [(event["time"], event["node"], event["value"]) for event in result["events"] if event["node"] == "pulse"]
+    assert (15, "and1", 0) in [(event["time"], event["node"], event["value"]) for event in result["events"]]
+    assert (25, "and2", 0) in [(event["time"], event["node"], event["value"]) for event in result["events"]]
+    assert (20, "pulse", 1) in changes
+    assert (30, "pulse", 0) in changes
+
+
+def test_stimulus_plan_fingerprint_is_separate_from_circuit():
+    example = get_example("combinational")
+    first = simulate(example["circuit"], example["stimulus"], max_time=160)
+    alternative = deepcopy(example["stimulus"])
+    alternative["events"] = [{"time": 20, "node": "B", "value": 1}]
+    second = simulate(example["circuit"], alternative, max_time=160)
+
+    assert second["circuitFingerprint"] == first["circuitFingerprint"]
+    assert second["stimulusFingerprint"] != first["stimulusFingerprint"]
+    assert second["fingerprint"] != first["fingerprint"]
+    nodes, edges = validate_circuit(example["circuit"])
+    assert circuit_fingerprint(nodes, edges) == first["circuitFingerprint"]
+    assert stimulus_fingerprint(example["stimulus"].get("initial", {}), [
+        (event["time"], event["node"], event["value"])
+        for event in example["stimulus"]["events"]
+    ]) == first["stimulusFingerprint"]
+
+
+def test_stimulus_initial_values_are_part_of_plan_fingerprint():
+    example = get_example("latch")
+    first = simulate(example["circuit"], example["stimulus"], max_time=40)
+    changed = deepcopy(example["stimulus"])
+    changed["initial"] = {"S": 0, "R": 1}
+    second = simulate(example["circuit"], changed, max_time=40)
+    assert second["circuitFingerprint"] == first["circuitFingerprint"]
+    assert second["stimulusFingerprint"] != first["stimulusFingerprint"]

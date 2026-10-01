@@ -45,6 +45,8 @@ class CircuitStore:
         name = str(payload.get("name") or "未命名电路")
         circuit = payload.get("circuit")
         stimulus = payload.get("stimulus", {"events": []})
+        plans = payload.get("plans")
+        active_plan_id = payload.get("activePlanId")
         if not isinstance(circuit, dict):
             raise ValueError("circuit is required")
         if not isinstance(stimulus, dict):
@@ -54,6 +56,8 @@ class CircuitStore:
             "name": name,
             "circuit": circuit,
             "stimulus": stimulus,
+            "plans": plans,
+            "activePlanId": active_plan_id,
             "updatedAt": int(time.time()),
         }
         with self._lock:

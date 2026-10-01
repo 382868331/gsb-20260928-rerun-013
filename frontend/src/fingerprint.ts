@@ -12,8 +12,19 @@ function stableValue(value: unknown): unknown {
   return value;
 }
 
-export function circuitFingerprint(circuit: Circuit, stimulus: Stimulus, maxTime: number): string {
-  const content = {
+function canonical(content: unknown): string {
+  return JSON.stringify(stableValue(content)).replace(/, /g, ",").replace(/: /g, ":");
+}
+
+export function circuitFingerprint(circuit: Circuit): string {
+  return canonical({
+    edges: circuit.edges
+      .map((edge) => ({ source: edge.source, target: edge.target, targetPort: edge.targetPort }))
+      .sort((left, right) =>
+        [left.source, left.target, left.targetPort].join("|").localeCompare(
+          [right.source, right.target, right.targetPort].join("|"),
+        ),
+      ),
     nodes: circuit.nodes
       .map((node) => ({
         id: node.id,
@@ -23,13 +34,11 @@ export function circuitFingerprint(circuit: Circuit, stimulus: Stimulus, maxTime
         initial: node.initial,
       }))
       .sort((left, right) => left.id.localeCompare(right.id)),
-    edges: circuit.edges
-      .map((edge) => ({ source: edge.source, target: edge.target, targetPort: edge.targetPort }))
-      .sort((left, right) =>
-        [left.source, left.target, left.targetPort].join("|").localeCompare(
-          [right.source, right.target, right.targetPort].join("|"),
-        ),
-      ),
+  });
+}
+
+export function stimulusFingerprint(stimulus: Stimulus): string {
+  return canonical({
     events: [...stimulus.events]
       .sort((left, right) =>
         left.time - right.time
@@ -37,9 +46,16 @@ export function circuitFingerprint(circuit: Circuit, stimulus: Stimulus, maxTime
           || String(left.value).localeCompare(String(right.value)),
       )
       .map((event) => ({ time: event.time, node: event.node, value: event.value })),
+    initial: stimulus.initial ?? {},
+  });
+}
+
+export function simulationFingerprint(circuit: Circuit, stimulus: Stimulus, maxTime: number): string {
+  return canonical({
+    circuit: circuitFingerprint(circuit),
+    stimulus: stimulusFingerprint(stimulus),
     maxTime,
-  };
-  return JSON.stringify(stableValue(content));
+  });
 }
 
 export function shortFingerprint(fingerprint: string): string {
