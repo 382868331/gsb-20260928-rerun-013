@@ -27,19 +27,62 @@ import type {
   SimulationResult,
   Stimulus,
   StimulusEvent,
+  StimulusPlan,
 } from "./types";
 
 const gateTypes: GateType[] = ["INPUT", "NOT", "BUFFER", "AND", "OR", "XOR", "NAND", "NOR", "XNOR"];
 const nodeCounter = { value: 0 };
+const defaultPlanId = "plan-1";
 
 type LoadedPayload = { name?: string; circuit: Circuit; stimulus?: Stimulus };
 type Baseline = { label: string; fingerprint: string; result: SimulationResult };
 type Snapshot = {
   nodes: Node[];
   edges: Edge[];
-  events: StimulusEvent[];
-  initial: Record<string, LogicValue>;
+  plans: StimulusPlan[];
+  activePlanId: string;
 };
+
+function normalizePlan(raw: Partial<StimulusPlan> | undefined, fallbackId: string, fallbackName: string): StimulusPlan {
+  const events = Array.isArray(raw?.events) ? raw!.events!.filter((event): event is StimulusEvent => Boolean(event)) : [];
+  return {
+    id: String(raw?.id || fallbackId),
+    name: String(raw?.name || fallbackName),
+    version: Math.max(1, Number(raw?.version ?? 1) || 1),
+    initial: raw?.initial ?? {},
+    events,
+  };
+}
+
+function normalizeStimulusDocument(raw: Stimulus | undefined): { plans: StimulusPlan[]; activePlanId: string } {
+  if (raw?.plans?.length) {
+    const plans = raw.plans.map((plan, index) => normalizePlan(plan, `plan-${index + 1}`, `方案 ${index + 1}`));
+    const activePlanId = plans.some((plan) => plan.id === raw.activePlanId) ? raw.activePlanId! : plans[0].id;
+    return { plans, activePlanId };
+  }
+  const plan = normalizePlan(raw, defaultPlanId, "方案 1");
+  return { plans: [plan], activePlanId: plan.id };
+}
+
+function circuitWithPlan(circuit: Circuit, plan: StimulusPlan): Circuit {
+  return {
+    ...circuit,
+    nodes: circuit.nodes.map((node) =>
+      node.type === "INPUT" ? { ...node, initial: plan.initial?.[node.id] ?? node.initial } : node,
+    ),
+  };
+}
+
+function documentStimulus(plans: StimulusPlan[], activePlanId: string): Stimulus {
+  const active = plans.find((plan) => plan.id === activePlanId) ?? plans[0];
+  return { ...active, plans, activePlanId };
+}
+
+function sortedEvents(events: StimulusEvent[]): StimulusEvent[] {
+  return [...events].sort((left, right) =>
+    left.time - right.time || left.node.localeCompare(right.node) || String(left.value).localeCompare(String(right.value)),
+  );
+}
 
 function toCircuit(nodes: Node[], edges: Edge[]): Circuit {
   return {
@@ -80,21 +123,13 @@ function toFlow(circuit: Circuit) {
   };
 }
 
-function initialOverrides(nodes: Node[], events: StimulusEvent[]): Stimulus {
-  const initial: Record<string, LogicValue> = {};
-  for (const node of nodes) {
-    if (node.data.type === "INPUT") initial[node.id] = (node.data.initial as LogicValue) ?? 0;
-  }
-  return { initial, events };
-}
-
 export function App() {
   const [examples, setExamples] = useState<ExampleSummary[]>([]);
   const [savedList, setSavedList] = useState<SavedSummary[]>([]);
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
-  const [stimulusEvents, setStimulusEvents] = useState<StimulusEvent[]>([]);
-  const [initialOverridesState, setInitialOverridesState] = useState<Record<string, LogicValue>>({});
+  const [stimulusPlans, setStimulusPlans] = useState<StimulusPlan[]>([normalizePlan(undefined, defaultPlanId, "方案 1")]);
+  const [activePlanId, setActivePlanId] = useState(defaultPlanId);
   const [maxTime, setMaxTime] = useState(160);
   const [result, setResult] = useState<SimulationResult | null>(null);
   const [baseline, setBaseline] = useState<Baseline | null>(null);
@@ -109,17 +144,15 @@ export function App() {
   const [historyVersion, setHistoryVersion] = useState(0);
   const runTokenRef = useRef(0);
   const loadTokenRef = useRef(0);
-  const autoRunRef = useRef<{ token: number; stimulus: Stimulus } | null>(null);
+  const autoRunRef = useRef<{ token: number; stimulus: Stimulus; plans: StimulusPlan[]; activePlanId: string } | null>(null);
 
   const circuit = useMemo(() => toCircuit(nodes, edges), [nodes, edges]);
-  const stimulus: Stimulus = useMemo(
-    () => ({ initial: initialOverridesState, events: stimulusEvents }),
-    [initialOverridesState, stimulusEvents],
-  );
+  const activePlan = useMemo(() => stimulusPlans.find((plan) => plan.id === activePlanId) ?? stimulusPlans[0], [stimulusPlans, activePlanId]);
+  const stimulus: Stimulus = useMemo(() => documentStimulus(stimulusPlans, activePlanId), [stimulusPlans, activePlanId]);
   const inputs = useMemo(() => circuit.nodes.filter((node) => node.type === "INPUT"), [circuit.nodes]);
   const fingerprint = useMemo(
-    () => (nodes.length ? circuitFingerprint(circuit, stimulus, maxTime) : ""),
-    [circuit, stimulus, maxTime, nodes.length],
+    () => (nodes.length && activePlan ? circuitFingerprint(circuitWithPlan(circuit, activePlan), stimulus, maxTime) : ""),
+    [circuit, stimulus, maxTime, nodes.length, activePlan],
   );
 
   const refreshSaved = useCallback(() => {
@@ -134,11 +167,8 @@ export function App() {
   const bumpHistory = useCallback(() => setHistoryVersion((value) => value + 1), []);
 
   const snapshot = useCallback((): Snapshot => ({
-    nodes,
-    edges,
-    events: stimulusEvents,
-    initial: { ...initialOverridesState },
-  }), [nodes, edges, stimulusEvents, initialOverridesState]);
+    nodes, edges, plans: stimulusPlans.map((plan) => ({ ...plan, initial: { ...plan.initial }, events: [...plan.events] })), activePlanId,
+  }), [nodes, edges, stimulusPlans, activePlanId]);
 
   const commitHistory = useCallback(() => {
     historyRef.current.push(snapshot());
@@ -155,8 +185,8 @@ export function App() {
   const restoreSnapshot = useCallback((next: Snapshot) => {
     setNodes(next.nodes);
     setEdges(next.edges);
-    setStimulusEvents(next.events);
-    setInitialOverridesState(next.initial);
+    setStimulusPlans(next.plans);
+    setActivePlanId(next.activePlanId);
     setSavedId(undefined);
     invalidate();
   }, [setNodes, setEdges, invalidate]);
@@ -193,16 +223,19 @@ export function App() {
   const runCircuit = useCallback(async (explicit?: { circuit: Circuit; stimulus: Stimulus; maxTime: number }) => {
     const requestCircuit = explicit?.circuit ?? circuit;
     if (!requestCircuit.nodes.length) return;
-    const requestStimulus = explicit?.stimulus ?? stimulus;
+    const requestDocument = explicit?.stimulus ?? stimulus;
+    const activeRequestPlan = normalizePlan(requestDocument, requestDocument.id || defaultPlanId, requestDocument.name || "方案 1");
+    const requestStimulus: Stimulus = { ...activeRequestPlan, plans: requestDocument.plans, activePlanId: requestDocument.activePlanId };
+    const requestedCircuit = circuitWithPlan(requestCircuit, activeRequestPlan);
     const requestMaxTime = explicit?.maxTime ?? maxTime;
-    const expectedFingerprint = circuitFingerprint(requestCircuit, requestStimulus, requestMaxTime);
+    const expectedFingerprint = circuitFingerprint(requestedCircuit, requestStimulus, requestMaxTime);
     const token = runTokenRef.current + 1;
     runTokenRef.current = token;
     setRunning(true);
     setError("");
     setResult(null);
     try {
-      const payload = await api.simulate(requestCircuit, requestStimulus, requestMaxTime);
+      const payload = await api.simulate(requestedCircuit, requestStimulus, requestMaxTime);
       if (runTokenRef.current !== token) return;
       if (payload.fingerprint !== expectedFingerprint) {
         setError("仿真结果与当前电路版本不一致，已丢弃。");
@@ -226,11 +259,12 @@ export function App() {
     loadTokenRef.current = loadToken;
     runTokenRef.current += 1;
     const flow = toFlow(payload.circuit);
-    const loadedStimulus: Stimulus = { initial: {}, events: payload.stimulus?.events ?? [], ...payload.stimulus };
+    const loadedDocument = normalizeStimulusDocument(payload.stimulus);
+    const loadedStimulus = documentStimulus(loadedDocument.plans, loadedDocument.activePlanId);
     setNodes(flow.nodes);
     setEdges(flow.edges);
-    setStimulusEvents(loadedStimulus.events ?? []);
-    setInitialOverridesState(loadedStimulus.initial ?? {});
+    setStimulusPlans(loadedDocument.plans);
+    setActivePlanId(loadedDocument.activePlanId);
     setCircuitName(payload.name ?? "未命名电路");
     setSavedId(id);
     setResult(null);
@@ -247,7 +281,7 @@ export function App() {
     }, 0);
     nodeCounter.value = Math.max(nodeCounter.value, maxCounter);
     if (autoRun) {
-      autoRunRef.current = { token: loadToken, stimulus: loadedStimulus };
+      autoRunRef.current = { token: loadToken, stimulus: loadedStimulus, plans: loadedDocument.plans, activePlanId: loadedDocument.activePlanId };
     }
   }, [bumpHistory, setEdges, setNodes]);
 
@@ -347,7 +381,7 @@ export function App() {
   };
 
   const save = async () => {
-    const saved = await api.save({ name: circuitName, circuit, stimulus: { initial: initialOverridesState, events: stimulusEvents } }, savedId);
+    const saved = await api.save({ name: circuitName, circuit, stimulus: documentStimulus(stimulusPlans, activePlanId) }, savedId);
     setSavedId(saved.id);
     setCircuitName(saved.name);
     refreshSaved();
@@ -355,23 +389,51 @@ export function App() {
 
   const addStimulus = () => {
     const firstInput = inputs[0]?.id;
-    if (!firstInput) return;
+    if (!firstInput || !activePlan) return;
     commitHistory();
     invalidate();
-    setStimulusEvents((current) => [...current, { time: current.at(-1)?.time ? current.at(-1)!.time + 20 : 20, node: firstInput, value: 1 }]);
+    setStimulusPlans((current) => current.map((plan) => plan.id === activePlan.id
+      ? { ...plan, version: plan.version + 1, events: [...plan.events, { time: plan.events.at(-1)?.time ? plan.events.at(-1)!.time + 20 : 20, node: firstInput, value: 1 }] }
+      : plan));
   };
 
   const updateStimulus = (updater: (current: StimulusEvent[]) => StimulusEvent[]) => {
+    if (!activePlan) return;
     commitHistory();
     invalidate();
-    setStimulusEvents(updater);
+    setStimulusPlans((current) => current.map((plan) => plan.id === activePlan.id
+      ? { ...plan, version: plan.version + 1, events: updater(plan.events) }
+      : plan));
   };
 
   const updateInitial = (nodeId: string, value: LogicValue) => {
     commitHistory();
     invalidate();
-    setInitialOverridesState((current) => ({ ...current, [nodeId]: value }));
+    setStimulusPlans((current) => current.map((plan) => plan.id === activePlanId
+      ? { ...plan, version: plan.version + 1, initial: { ...plan.initial, [nodeId]: value } }
+      : plan));
     setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, initial: value } } : node));
+  };
+
+  const switchPlan = (planId: string) => {
+    if (planId === activePlanId) return;
+    commitHistory();
+    invalidate();
+    setActivePlanId(planId);
+    const plan = stimulusPlans.find((item) => item.id === planId);
+    setNodes((current) => current.map((node) => node.data.type === "INPUT" ? {
+      ...node,
+      data: { ...node.data, initial: plan?.initial?.[node.id] ?? (node.data.initial as LogicValue) },
+    } : node));
+  };
+
+  const duplicatePlan = () => {
+    if (!activePlan) return;
+    commitHistory();
+    invalidate();
+    const copy: StimulusPlan = { ...activePlan, id: `${activePlan.id}-copy-${Date.now().toString(36)}`, name: `${activePlan.name} 副本`, version: 1, initial: { ...activePlan.initial }, events: activePlan.events.map((event) => ({ ...event })) };
+    setStimulusPlans((current) => [...current, copy]);
+    setActivePlanId(copy.id);
   };
 
   const disconnectSelected = () => {
@@ -381,13 +443,14 @@ export function App() {
     setEdges((current) => current.filter((edge) => !edge.selected));
   };
 
-  const keepBaseline = useCallback(() => {
-    if (result) setBaseline({ label: `修订 #${revision}`, fingerprint: result.fingerprint, result });
-  }, [result, revision]);
-
-  const resultMatchesCurrent = result?.fingerprint === fingerprint;
+  const currentResult = result?.fingerprint === fingerprint ? result : null;
+  const resultMatchesCurrent = Boolean(currentResult);
   const canUndo = historyRef.current.length > 0;
   const canRedo = futureRef.current.length > 0;
+
+  const keepBaseline = useCallback(() => {
+    if (currentResult && activePlan) setBaseline({ label: `${activePlan.name} v${activePlan.version}`, fingerprint: currentResult.fingerprint, result: currentResult });
+  }, [currentResult, activePlan]);
 
   return (
     <main className="app">
@@ -423,16 +486,22 @@ export function App() {
           <div className="initial-grid">
             {inputs.length ? inputs.map((input) => (
               <label key={input.id}>{input.id}
-                <select value={String(initialOverridesState[input.id] ?? input.initial ?? 0)} onChange={(e) => updateInitial(input.id, e.target.value === "x" ? "x" : Number(e.target.value) as LogicValue)}>
+                <select value={String(activePlan?.initial?.[input.id] ?? input.initial ?? 0)} onChange={(e) => updateInitial(input.id, e.target.value === "x" ? "x" : Number(e.target.value) as LogicValue)}>
                   <option value="0">0</option><option value="1">1</option><option value="x">X</option>
                 </select>
               </label>
             )) : <p className="hint">添加 INPUT 元件。</p>}
           </div>
 
-          <h2>输入事件</h2>
+          <h2>输入激励方案</h2>
+          <div className="plan-controls">
+            <select value={activePlanId} onChange={(event) => switchPlan(event.target.value)}>
+              {stimulusPlans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name} v{plan.version}</option>)}
+            </select>
+            <button onClick={duplicatePlan} disabled={!activePlan}>复制方案</button>
+          </div>
           <div className="events-editor">
-            {stimulusEvents.map((event, index) => (
+            {activePlan?.events.map((event, index) => (
               <div className="event-row" key={`${index}-${event.node}`}>
                 <input type="number" value={event.time} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, time: Number(e.target.value) } : item))} />
                 <select value={event.node} onChange={(e) => updateStimulus((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, node: e.target.value } : item))}>
@@ -445,6 +514,7 @@ export function App() {
               </div>
             ))}
             <button onClick={addStimulus} disabled={!inputs.length}>添加输入变化</button>
+            <p className="hint">同一时刻可给多个输入添加跳变；同一输入可多次跳变。编辑任一行都会生成该方案的新版本。</p>
           </div>
 
           <h2>保存 / 读取</h2>
@@ -463,7 +533,7 @@ export function App() {
             <button onClick={disconnectSelected}>断开选中连线</button>
             <span className="revision">
               修订 #{revision} · 指纹 {fingerprint ? shortFingerprint(fingerprint) : "—"} · 
-              {running ? "计算中" : result ? (resultMatchesCurrent ? "结果属于当前电路" : "结果版本不符，已隔离") : "尚未运行"}
+              {running ? "计算中" : resultMatchesCurrent ? "结果属于当前组合" : "等待当前组合运行"}
             </span>
           </div>
           <ReactFlow
@@ -485,19 +555,19 @@ export function App() {
           <h2>仿真状态</h2>
           {error && <div className="error">{error}</div>}
           {!ready && <div className="empty-panel">正在载入首个示例，空画布不会被提交。</div>}
-          {result ? <StatusCard result={result} current={resultMatchesCurrent} /> : ready ? <div className="empty-panel">尚未运行。</div> : null}
-          <h2>修订波形对照</h2>
+          {currentResult ? <StatusCard result={currentResult} current={true} /> : ready ? <div className="empty-panel">尚未运行。</div> : null}
+          <h2>激励方案对照</h2>
           <div className="compare-controls">
-            <button onClick={keepBaseline} disabled={!result || !resultMatchesCurrent}><GitCompareArrows size={14} /> 保存当前结果为对照基线</button>
+            <button onClick={keepBaseline} disabled={!currentResult}><GitCompareArrows size={14} /> 保存当前方案结果为对照基线</button>
             <button onClick={() => setBaseline(null)} disabled={!baseline}>清除基线</button>
           </div>
           {baseline && <div className="baseline-meta">基线：{baseline.label}（{shortFingerprint(baseline.fingerprint)}）</div>}
-          <WaveformPanel result={resultMatchesCurrent ? result : null} baseline={baseline} />
-          <RevisionDiff current={resultMatchesCurrent ? result : null} baseline={baseline} />
+          <WaveformPanel result={currentResult} baseline={baseline} />
+          <PlanDiff current={currentResult} baseline={baseline} plans={stimulusPlans} activePlan={activePlan} />
           <h2>实际事件</h2>
-          <div className="log-list">{result?.events.map((event, index) => <div key={index}><b>t={event.time}</b> {event.node} → {String(event.value)} <span>{event.reason}</span></div>)}</div>
+          <div className="log-list">{currentResult?.events.map((event, index) => <div key={index}><b>t={event.time}</b> {event.node} → {String(event.value)} <span>{event.reason}</span></div>)}</div>
           <h2>诊断</h2>
-          <div className="diagnostics">{result?.diagnostics.map((item, index) => <div key={index} className={item.severity}>t={item.time} {item.message}</div>)}{result && !result.diagnostics.length && <div className="ok">无断连或争用</div>}</div>
+          <div className="diagnostics">{currentResult?.diagnostics.map((item, index) => <div key={index} className={item.severity}>t={item.time} {item.message}</div>)}{currentResult && !currentResult.diagnostics.length && <div className="ok">无断连或争用</div>}</div>
         </aside>
       </section>
     </main>
@@ -567,6 +637,41 @@ function RevisionDiff({ current, baseline }: { current: SimulationResult | null;
         </tbody>
       </table>
       {!rows.length && <div className="ok">跳变时刻没有差异。</div>}
+    </div>
+  );
+}
+
+type TracePoint = { time: number; value: LogicValue };
+
+function valueAtTime(trace: TracePoint[], time: number): LogicValue {
+  let value = trace[0]?.value ?? "x";
+  for (const point of trace) if (point.time <= time) value = point.value;
+  return value;
+}
+
+function PlanDiff({ current, baseline, plans, activePlan }: { current: SimulationResult | null; baseline: Baseline | null; plans: StimulusPlan[]; activePlan: StimulusPlan | undefined }) {
+  if (!current || !baseline) return <RevisionDiff current={current} baseline={baseline} />;
+  if (current.fingerprint === baseline.fingerprint) return <div className="ok">两个方案内容相同，波形一致。</div>;
+  const maxTime = Math.max(current.maxTime, baseline.result.maxTime);
+  const nodes = Array.from(new Set([...Object.keys(current.waveforms), ...Object.keys(baseline.result.waveforms)])).sort();
+  let first: { time: number; node: string; base: LogicValue; current: LogicValue } | null = null;
+  const times = Array.from({ length: maxTime + 1 }, (_, time) => time);
+  for (const time of times) {
+    for (const node of nodes) {
+      const base = valueAtTime(baseline.result.waveforms[node] ?? [], time);
+      const next = valueAtTime(current.waveforms[node] ?? [], time);
+      if (base !== next) { first = { time, node, base, current: next }; break; }
+    }
+    if (first) break;
+  }
+  const baselinePlan = plans.find((plan) => plan.id === baseline.result.planId);
+  const currentPlan = plans.find((plan) => plan.id === current.planId) ?? activePlan;
+  const causes = first ? sortedEvents((currentPlan ?? baselinePlan)?.events ?? []).filter((event) => event.time <= first.time).slice(-6) : [];
+  return (
+    <div className="revision-diff">
+      <div className={first ? "contention" : "ok"}>{first ? <>首次输出差异：<b>t={first.time}</b>，节点 {first.node}：{String(first.base)} → {String(first.current)}</> : "观测窗口内没有输出差异。"}</div>
+      {first && <div className="trace-box"><b>差异前输入变化：</b>{causes.map((event) => <span key={`${event.time}-${event.node}`}>t={event.time} {event.node}={String(event.value)}；</span>)}</div>}
+      <RevisionDiff current={current} baseline={baseline} />
     </div>
   );
 }

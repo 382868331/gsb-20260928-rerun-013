@@ -52,6 +52,7 @@ h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: #
 .property-grid label, .save-row { display: grid; gap: 4px; font-size: 12px; color: #64748b; }
 .hint, .empty-panel { color: #64748b; font-size: 13px; padding: 12px; background: #fff; border: 1px dashed #cbd5e1; border-radius: 10px; }
 .events-editor { display: grid; gap: 7px; }
+.plan-controls { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-bottom: 7px; }
 .event-row { display: grid; grid-template-columns: 62px 1fr 54px 30px; gap: 5px; align-items: center; }
 .event-row input, .event-row select { padding: 5px; font-size: 12px; }
 .save-row { grid-template-columns: 1fr auto; display: grid; }
@@ -153,3 +154,5 @@ svg { width: 100%; min-width: 520px; display: block; }
 .revision-diff th { background: #f1f5f9; color: #475569; }
 .revision-diff .later { color: #b45309; font-weight: 700; }
 .revision-diff .earlier { color: #1d4ed8; font-weight: 700; }
+.trace-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 7px; padding: 7px; font-size: 12px; display: grid; gap: 4px; }
+.trace-box span { color: #475569; }

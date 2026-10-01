@@ -78,3 +78,33 @@ def test_fingerprint_tracks_content_but_ignores_canvas_position():
 
     shorter_window = simulate(example["circuit"], example["stimulus"], max_time=80)
     assert shorter_window["fingerprint"] != first["fingerprint"]
+
+
+def test_simultaneous_input_events_are_processed_as_one_time_step():
+    example = get_example("combinational")
+    example["stimulus"] = {
+        "id": "plan-a",
+        "name": "同刻方案",
+        "version": 3,
+        "events": [
+            {"time": 20, "node": "A", "value": 1},
+            {"time": 20, "node": "B", "value": 1},
+        ],
+    }
+    result = simulate(example["circuit"], example["stimulus"], max_time=80)
+    assert result["planId"] == "plan-a"
+    assert result["planVersion"] == 3
+    changes_at_20 = [(event["node"], event["value"]) for event in result["events"] if event["time"] == 20]
+    assert ("A", 1) in changes_at_20
+    assert ("B", 1) in changes_at_20
+    assert {"time": 30, "node": "nand", "value": 0} in [
+        {"time": event["time"], "node": event["node"], "value": event["value"]}
+        for event in result["events"]
+    ]
+
+
+def test_stimulus_plan_revision_changes_result_identity():
+    example = get_example("combinational")
+    first = simulate(example["circuit"], {"id": "p", "version": 1, "events": []}, max_time=80)
+    second = simulate(example["circuit"], {"id": "p", "version": 2, "events": []}, max_time=80)
+    assert first["fingerprint"] != second["fingerprint"]

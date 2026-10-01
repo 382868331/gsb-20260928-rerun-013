@@ -30,12 +30,14 @@ def circuit_fingerprint(
     edges: list[dict[str, str]],
     events: list[tuple[int, str, Any]],
     max_time: int,
+    stimulus: dict[str, Any] | None = None,
 ) -> str:
     """Return a canonical content fingerprint for a simulated revision.
 
     Node positions intentionally do not participate: moving a gate on the
     canvas must not invalidate or misattribute simulation results.
     """
+    stimulus = stimulus or {}
     canonical = {
         "edges": [
             {"source": edge["source"], "target": edge["target"], "targetPort": edge["targetPort"]}
@@ -58,6 +60,12 @@ def circuit_fingerprint(
             {"time": time, "node": node_id, "value": value}
             for time, node_id, value in sorted(events, key=lambda item: (item[0], item[1], str(item[2])))
         ],
+        "initial": stimulus.get("initial", {}),
+        "plan": {
+            "id": str(stimulus.get("id", "default")),
+            "name": str(stimulus.get("name", "方案 1")),
+            "version": int(stimulus.get("version", 1)),
+        },
         "maxTime": int(max_time),
     }
     return json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -331,7 +339,10 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
         status = "truncated"
 
     return {
-        "fingerprint": circuit_fingerprint(nodes, edges, scheduled_input_events, max_time),
+        "fingerprint": circuit_fingerprint(nodes, edges, scheduled_input_events, max_time, stimulus),
+        "planId": str(stimulus.get("id", "default")),
+        "planName": str(stimulus.get("name", "方案 1")),
+        "planVersion": int(stimulus.get("version", 1)),
         "status": status,
         "maxTime": max_time,
         "processedEvents": processed,

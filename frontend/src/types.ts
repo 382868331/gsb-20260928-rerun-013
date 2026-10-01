@@ -25,7 +25,17 @@ export type Circuit = {
 };
 
 export type StimulusEvent = { time: number; node: string; value: LogicValue };
-export type Stimulus = { initial?: Record<string, LogicValue>; events: StimulusEvent[] };
+export type StimulusPlan = {
+  id: string;
+  name: string;
+  version: number;
+  initial?: Record<string, LogicValue>;
+  events: StimulusEvent[];
+};
+export type Stimulus = StimulusPlan & {
+  plans?: StimulusPlan[];
+  activePlanId?: string;
+};
 
 export type SimulationEvent = {
   time: number;
@@ -42,6 +52,9 @@ export type Diagnostic = {
 
 export type SimulationResult = {
   fingerprint: string;
+  planId: string;
+  planName: string;
+  planVersion: number;
   status: "stable" | "oscillating" | "truncated";
   maxTime: number;
   processedEvents: number;

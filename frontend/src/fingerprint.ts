@@ -37,6 +37,12 @@ export function circuitFingerprint(circuit: Circuit, stimulus: Stimulus, maxTime
           || String(left.value).localeCompare(String(right.value)),
       )
       .map((event) => ({ time: event.time, node: event.node, value: event.value })),
+    initial: stimulus.initial ?? {},
+    plan: {
+      id: stimulus.id ?? "default",
+      name: stimulus.name ?? "方案 1",
+      version: stimulus.version ?? 1,
+    },
     maxTime,
   };
   return JSON.stringify(stableValue(content));

@@ -32,6 +32,9 @@ EXAMPLES = {
             ],
         },
         "stimulus": {
+            "id": "combinational",
+            "name": "基础跳变",
+            "version": 1,
             "events": [
                 {"time": 20, "node": "A", "value": 1},
                 {"time": 55, "node": "B", "value": 1},
@@ -57,6 +60,9 @@ EXAMPLES = {
             ],
         },
         "stimulus": {
+            "id": "latch",
+            "name": "锁存脉冲",
+            "version": 1,
             "initial": {"S": 1, "R": 1},
             "events": [
                 {"time": 20, "node": "S", "value": 0},
@@ -77,7 +83,7 @@ EXAMPLES = {
                 {"id": "o-loop", "source": "clk", "target": "clk", "targetPort": "in"}
             ],
         },
-        "stimulus": {"events": []},
+        "stimulus": {"id": "oscillator", "name": "无外部激励", "version": 1, "events": []},
     },
     "faults": {
         "name": "可见故障：断连与输出争用",
@@ -93,7 +99,7 @@ EXAMPLES = {
                 {"id": "f-high", "source": "high", "target": "check", "targetPort": "in1"},
             ],
         },
-        "stimulus": {"events": []},
+        "stimulus": {"id": "faults", "name": "稳态故障", "version": 1, "events": []},
     },
 }
 
