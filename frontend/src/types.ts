@@ -68,4 +68,20 @@ export type SavedCircuit = SavedSummary & {
   stimulus?: Stimulus;
   plans?: StimulusPlan[];
   activePlanId?: string;
+  comparePlanId?: string;
+  maxTime?: number;
+  cursorTime?: number | null;
+  baseline?: PersistedBaseline | null;
+};
+
+export type PersistedBaseline = {
+  label: string;
+  fingerprint: string;
+  circuitFingerprint: string;
+  stimulusFingerprint: string;
+  planId: string;
+  planName: string;
+  planVersion: number;
+  maxTime: number;
+  result: SimulationResult;
 };

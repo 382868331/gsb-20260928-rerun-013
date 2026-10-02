@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent as ReactFocusEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   addEdge,
   Background,
@@ -11,11 +11,12 @@ import {
   type Node,
   type NodeChange,
 } from "@xyflow/react";
-import { GitCompareArrows, Redo2, Trash2, Undo2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Crosshair, GitCompareArrows, Redo2, Trash2, Undo2 } from "lucide-react";
 import { api } from "./api";
 import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
 import { nodeTypes } from "./GateNode";
 import { WaveformPanel } from "./WaveformPanel";
+import { findFirstDifference, valueAtTime } from "./compareUtils";
 import type {
   Circuit,
   CircuitNode,
@@ -39,8 +40,11 @@ type LoadedPayload = {
   stimulus?: Stimulus;
   plans?: StimulusPlan[];
   activePlanId?: string;
+  comparePlanId?: string;
+  maxTime?: number;
+  cursorTime?: number | null;
+  baseline?: Baseline | null;
 };
-type Baseline = { label: string; fingerprint: string; result: SimulationResult };
 type RunRecord = { fingerprint: string; status: "running" | "ready" | "error"; result?: SimulationResult; error?: string };
 type Snapshot = {
   nodes: Node[];
@@ -48,6 +52,50 @@ type Snapshot = {
   plans: StimulusPlan[];
   activePlanId: string;
 };
+
+type Baseline = {
+  label: string;
+  fingerprint: string;
+  circuitFingerprint: string;
+  stimulusFingerprint: string;
+  planId: string;
+  planName: string;
+  planVersion: number;
+  maxTime: number;
+  result: SimulationResult;
+};
+
+const RESULTS_WIDTH_KEY = "results-panel-width";
+const RESULTS_COLLAPSED_KEY = "results-panel-collapsed";
+
+function readStoredWidth(): number {
+  const value = Number(localStorage.getItem(RESULTS_WIDTH_KEY));
+  return Number.isFinite(value) ? Math.min(720, Math.max(300, value)) : 420;
+}
+
+function readStoredCollapsed(): boolean {
+  return localStorage.getItem(RESULTS_COLLAPSED_KEY) === "1";
+}
+
+function baselineFromPayload(payload: LoadedPayload): Baseline | null {
+  const stored = payload.baseline;
+  const result = stored?.result;
+  if (!stored || !result || typeof stored.fingerprint !== "string" || result.fingerprint !== stored.fingerprint) return null;
+  if (typeof stored.circuitFingerprint !== "string" || typeof stored.stimulusFingerprint !== "string") return null;
+  if (result.circuitFingerprint !== stored.circuitFingerprint || result.stimulusFingerprint !== stored.stimulusFingerprint) return null;
+  const planId = String(stored.planId ?? "");
+  return {
+    label: String(stored.label ?? "锁定基线"),
+    fingerprint: stored.fingerprint,
+    circuitFingerprint: stored.circuitFingerprint,
+    stimulusFingerprint: stored.stimulusFingerprint,
+    planId,
+    planName: String(stored.planName ?? planId),
+    planVersion: Number(stored.planVersion ?? 1),
+    maxTime: Number.isFinite(Number(stored.maxTime)) ? Number(stored.maxTime) : Number(result.maxTime ?? 160),
+    result,
+  };
+}
 
 function toCircuit(nodes: Node[], edges: Edge[]): Circuit {
   return {
@@ -130,11 +178,17 @@ export function App() {
   const [savedId, setSavedId] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
   const [ready, setReady] = useState(false);
+  const [cursorTime, setCursorTime] = useState<number | null>(null);
+  const [resultsWidth, setResultsWidth] = useState(readStoredWidth);
+  const [resultsCollapsed, setResultsCollapsed] = useState(readStoredCollapsed);
+  const [canvasFocused, setCanvasFocused] = useState(false);
   const historyRef = useRef<Snapshot[]>([]);
   const futureRef = useRef<Snapshot[]>([]);
   const [historyVersion, setHistoryVersion] = useState(0);
   const loadTokenRef = useRef(0);
-  const autoRunRef = useRef<{ token: number; planId: string } | null>(null);
+  const autoRunRef = useRef<{ token: number; planId: string; alsoCompare?: string } | null>(null);
+  const resultsRef = useRef<HTMLElement | null>(null);
+  const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
 
   const circuit = useMemo(() => toCircuit(nodes, edges), [nodes, edges]);
   const activePlan = useMemo(
@@ -273,11 +327,16 @@ export function App() {
     setEdges(flow.edges);
     setPlans(loadedPlans.plans);
     setActivePlanId(loadedPlans.activePlanId);
-    setComparePlanId("");
+    const restoredCompare = loadedPlans.plans.some((plan) => plan.id === payload.comparePlanId) && payload.comparePlanId !== loadedPlans.activePlanId
+      ? payload.comparePlanId!
+      : "";
+    setComparePlanId(restoredCompare);
     setCircuitName(payload.name ?? "未命名电路");
     setSavedId(id);
-    setBaseline(null);
+    setBaseline(baselineFromPayload(payload));
     setRuns({});
+    if (typeof payload.maxTime === "number" && payload.maxTime > 0) setMaxTime(payload.maxTime);
+    setCursorTime(typeof payload.cursorTime === "number" && payload.cursorTime >= 0 ? payload.cursorTime : null);
     setRevision((value) => value + 1);
     setReady(true);
     historyRef.current = [];
@@ -290,7 +349,7 @@ export function App() {
     nodeCounter.value = Math.max(nodeCounter.value, maxCounter);
     if (autoRun) {
       const loadedPlan = loadedPlans.plans.find((plan) => plan.id === loadedPlans.activePlanId)!;
-      autoRunRef.current = { token: loadToken, planId: loadedPlan.id };
+      autoRunRef.current = { token: loadToken, planId: loadedPlan.id, alsoCompare: restoredCompare || undefined };
     }
   }, [bumpHistory, setEdges, setNodes]);
 
@@ -339,7 +398,8 @@ export function App() {
     if (!pending || pending.token !== loadTokenRef.current || !nodes.length) return;
     autoRunRef.current = null;
     const loadedPlan = plans.find((plan) => plan.id === pending.planId) ?? plans[0];
-    if (loadedPlan) void runCircuit(loadedPlan);
+    const otherPlan = pending.alsoCompare ? plans.find((plan) => plan.id === pending.alsoCompare) : undefined;
+    if (loadedPlan) void runCircuit(loadedPlan).then(() => { if (otherPlan) void runCircuit(otherPlan); });
   });
 
   const onNodesChange = useCallback((changes: NodeChange<Node>[]) => {
@@ -392,6 +452,10 @@ export function App() {
       stimulus: planToStimulus(activePlan),
       plans,
       activePlanId,
+      comparePlanId,
+      maxTime,
+      cursorTime,
+      baseline,
     }, savedId);
     setSavedId(saved.id);
     setCircuitName(saved.name);
@@ -446,7 +510,6 @@ export function App() {
   };
 
   const selectPlan = (id: string) => {
-    setBaseline(null);
     setActivePlanId(id);
     setComparePlanId((current) => (current === id ? "" : current));
   };
@@ -465,8 +528,36 @@ export function App() {
   };
 
   const keepBaseline = useCallback(() => {
-    if (result) setBaseline({ label: `修订 #${revision}`, fingerprint: result.fingerprint, result });
-  }, [result, revision]);
+    if (!result || !activePlan || result.fingerprint !== fingerprint) return;
+    setBaseline({
+      label: `修订 #${revision} · ${activePlan.name} v${activePlan.version}`,
+      fingerprint: result.fingerprint,
+      circuitFingerprint: circuitFingerprintValue,
+      stimulusFingerprint: stimulusFingerprint(stimulus),
+      planId: activePlan.id,
+      planName: activePlan.name,
+      planVersion: activePlan.version,
+      maxTime,
+      result,
+    });
+  }, [result, activePlan, fingerprint, revision, circuitFingerprintValue, stimulus, maxTime]);
+
+  const baselineCircuitMatches = baseline?.circuitFingerprint === circuitFingerprintValue;
+  const baselinePlan = baseline ? plans.find((plan) => plan.id === baseline.planId) ?? null : null;
+  const baselinePlanMatches = baseline ? {
+    name: baselinePlan?.name === baseline.planName,
+    version: baselinePlan?.version === baseline.planVersion,
+    stimulus: baselinePlan ? stimulusFingerprint(planToStimulus(baselinePlan)) === baseline.stimulusFingerprint : false,
+  } : null;
+  const baselineStale = !!baseline && (
+    !baselineCircuitMatches
+    || !baselinePlan
+    || !baselinePlanMatches?.name
+    || !baselinePlanMatches?.version
+    || !baselinePlanMatches?.stimulus
+    || baseline.maxTime !== maxTime
+  );
+
 
   const resultMatchesCurrent = result?.fingerprint === fingerprint;
   const resultForPlan = (plan: StimulusPlan) => {
@@ -480,6 +571,59 @@ export function App() {
     : baseline;
   const canUndo = historyRef.current.length > 0;
   const canRedo = futureRef.current.length > 0;
+  const effectiveMaxTime = Math.max(result?.maxTime ?? 0, waveformBaseline?.result.maxTime ?? 0);
+  const clampedCursorTime = cursorTime !== null && effectiveMaxTime > 0
+    ? Math.max(0, Math.min(cursorTime, effectiveMaxTime))
+    : null;
+
+  const toggleResults = useCallback(() => {
+    setResultsCollapsed((current) => {
+      const next = !current;
+      localStorage.setItem(RESULTS_COLLAPSED_KEY, next ? "1" : "0");
+      return next;
+    });
+  }, []);
+
+  const onResultsResizeStart = useCallback((event: ReactPointerEvent) => {
+    event.preventDefault();
+    resizeStartRef.current = { x: event.clientX, width: resultsWidth };
+    const onMove = (moveEvent: PointerEvent) => {
+      const start = resizeStartRef.current;
+      if (!start) return;
+      const nextWidth = Math.min(720, Math.max(300, start.width + (start.x - moveEvent.clientX)));
+      setResultsWidth(nextWidth);
+      localStorage.setItem(RESULTS_WIDTH_KEY, String(nextWidth));
+    };
+    const onUp = () => {
+      resizeStartRef.current = null;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("col-resizing");
+    };
+    document.body.classList.add("col-resizing");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, [resultsWidth]);
+
+  const onResultsFocusIn = useCallback((event: ReactFocusEvent<HTMLElement>) => {
+    event.target.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, []);
+
+  const firstDiff = useMemo(() => {
+    if (!result) return null;
+    if (comparePlan && compareResult) {
+      const outputIds = Array.from(new Set([
+        ...Object.keys(result.waveforms).filter((nodeId) => !inputs.some((input) => input.id === nodeId)),
+        ...Object.keys(compareResult.waveforms).filter((nodeId) => !inputs.some((input) => input.id === nodeId)),
+      ])).sort();
+      return findFirstDifference(result, compareResult, outputIds);
+    }
+    if (!comparePlan && baseline) {
+      const outputIds = Array.from(new Set([...Object.keys(result.waveforms), ...Object.keys(baseline.result.waveforms)])).sort();
+      return findFirstDifference(result, baseline.result, outputIds);
+    }
+    return null;
+  }, [result, comparePlan, compareResult, baseline, inputs]);
 
   return (
     <main className="app">
@@ -497,7 +641,10 @@ export function App() {
         </div>
       </header>
 
-      <section className="workspace">
+      <section
+        className="workspace"
+        style={{ gridTemplateColumns: `280px minmax(0, 1fr) ${resultsCollapsed ? 0 : resultsWidth}px` }}
+      >
         <aside className="sidebar">
           <h2>元件</h2>
           <div className="gate-buttons">{gateTypes.map((type) => <button key={type} onClick={() => addNode(type)}>+ {type}</button>)}</div>
@@ -576,7 +723,9 @@ export function App() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
-            deleteKeyCode={["Delete", "Backspace"]}
+            deleteKeyCode={canvasFocused ? ["Delete", "Backspace"] : null}
+            onFocus={() => setCanvasFocused(true)}
+            onBlur={() => setCanvasFocused(false)}
             fitView
           >
             <Background />
@@ -584,43 +733,145 @@ export function App() {
           </ReactFlow>
         </section>
 
-        <aside className="results">
-          <h2>仿真状态</h2>
-          {currentError && <div className="error">{currentError}</div>}
-          {!ready && <div className="empty-panel">正在载入首个示例，空画布不会被提交。</div>}
-          {result ? <StatusCard result={result} current={resultMatchesCurrent} />
-            : running ? <div className="empty-panel">当前电路/方案组合计算中，旧结果不会写入诊断、事件或稳定状态。</div>
-            : ready ? <div className="empty-panel">尚未运行。</div> : null}
-          <h2>方案 / 修订波形对照</h2>
-          <div className="compare-controls">
-            <select value={comparePlanId} onChange={(event) => setComparePlanId(event.target.value)}>
-              <option value="">不比较其他方案</option>
-              {plans.filter((plan) => plan.id !== activePlanId).map((plan) => <option key={plan.id} value={plan.id}>{plan.name} v{plan.version}</option>)}
-            </select>
-            <button onClick={keepBaseline} disabled={!result || !resultMatchesCurrent}><GitCompareArrows size={14} /> 锁定电路修订基线</button>
-            <button onClick={() => setBaseline(null)} disabled={!baseline}>清除修订基线</button>
-          </div>
-          {comparePlan && !compareResult && <div className="baseline-meta">{comparePlan.name} 尚未在当前电路修订上运行；点击“运行方案”。</div>}
-          {waveformBaseline && <div className="baseline-meta">虚线基线：{waveformBaseline.label}（{shortFingerprint(waveformBaseline.fingerprint)}）</div>}
-          <WaveformPanel result={result} baseline={waveformBaseline} />
-          <PlanDiff current={result} currentPlan={activePlan} compare={compareResult} comparePlan={comparePlan} inputIds={inputs.map((input) => input.id)} />
-          {!comparePlan && <RevisionDiff current={result} baseline={baseline} />}
-          <h2>实际事件</h2>
-          <div className="log-list">{result?.events.map((event, index) => <div key={index}><b>t={event.time}</b> {event.node} → {String(event.value)} <span>{event.reason}</span></div>)}</div>
-          <h2>诊断</h2>
-          <div className="diagnostics">{result?.diagnostics.map((item, index) => <div key={index} className={item.severity}>t={item.time} {item.message}</div>)}{result && !result.diagnostics.length && <div className="ok">无断连或争用</div>}</div>
+        <aside
+          className={`results${resultsCollapsed ? " collapsed" : ""}`}
+          aria-hidden={resultsCollapsed}
+          ref={(element) => { resultsRef.current = element; }}
+          onFocusCapture={onResultsFocusIn}
+          tabIndex={-1}
+        >
+          {!resultsCollapsed && (
+            <>
+              <div className="results-sticky">
+                <div className="results-sticky-row">
+                  <h2>仿真状态</h2>
+                  <button
+                    type="button"
+                    className="collapse-button"
+                    onClick={toggleResults}
+                    title="折叠结果面板"
+                    aria-label="折叠结果面板"
+                  ><ChevronRight size={15} /></button>
+                </div>
+                {currentError && <div className="error">{currentError}</div>}
+                {!ready && <div className="empty-panel">正在载入首个示例，空画布不会被提交。</div>}
+                {result ? <StatusCard result={result} current={resultMatchesCurrent} activePlan={activePlan} circuitFingerprint={circuitFingerprintValue} />
+                  : running ? <div className="empty-panel">当前电路/方案组合计算中，旧结果不会写入诊断、事件或稳定状态。</div>
+                  : ready ? <div className="empty-panel">尚未运行。</div> : null}
+              </div>
+
+              <div className="results-sticky compare-sticky">
+                <h2>方案 / 修订波形对照</h2>
+                <div className="compare-controls">
+                  <select value={comparePlanId} onChange={(event) => setComparePlanId(event.target.value)} aria-label="选择用于比较的输入方案">
+                    <option value="">不比较其他方案（使用锁定基线）</option>
+                    {plans.filter((plan) => plan.id !== activePlanId).map((plan) => <option key={plan.id} value={plan.id}>{plan.name} v{plan.version}</option>)}
+                  </select>
+                  <button onClick={keepBaseline} disabled={!result || !resultMatchesCurrent}><GitCompareArrows size={14} /> 锁定电路修订基线</button>
+                  <button onClick={() => setBaseline(null)} disabled={!baseline}>清除修订基线</button>
+                </div>
+                {baseline && (
+                  <div className={`baseline-meta${baselineStale ? " stale" : ""}`}>
+                    {baselineStale ? "已锁定基线与当前电路/方案不再对应：" : "已锁定基线对应："}
+                    电路 {shortFingerprint(baseline.circuitFingerprint)} · 方案「{baseline.planName}」v{baseline.planVersion}
+                    （{shortFingerprint(baseline.stimulusFingerprint)}）· 窗口 {baseline.maxTime} ns · 结果 {shortFingerprint(baseline.fingerprint)}
+                  </div>
+                )}
+                {comparePlan && (
+                  <div className="baseline-meta">
+                    比较中的输入方案：「{comparePlan.name}」v{comparePlan.version}（{shortFingerprint(stimulusFingerprint(planToStimulus(comparePlan))) }）
+                    {!compareResult && <span> — 尚未在当前电路修订上运行；点击“运行方案”。</span>}
+                  </div>
+                )}
+                {waveformBaseline && !comparePlan && (
+                  <div className="baseline-meta">虚线基线：{baseline!.label}（{shortFingerprint(waveformBaseline.fingerprint)}）</div>
+                )}
+              </div>
+              {firstDiff && (
+                <button
+                  type="button"
+                  className="locate-diff"
+                  onClick={() => setCursorTime(firstDiff.time)}
+                ><Crosshair size={14} /> 定位首个差异：t={firstDiff.time}，节点 {firstDiff.nodeId}</button>
+              )}
+              <WaveformPanel
+                result={result}
+                baseline={waveformBaseline}
+                cursorTime={clampedCursorTime}
+                diffTime={firstDiff?.time ?? null}
+                onCursorTimeChange={setCursorTime}
+              />
+              <PlanDiff current={result} currentPlan={activePlan} compare={compareResult} comparePlan={comparePlan} inputIds={inputs.map((input) => input.id)} onLocate={(time) => setCursorTime(time)} />
+              {!comparePlan && <RevisionDiff current={result} baseline={baseline} onLocate={(time) => setCursorTime(time)} />}
+              <h2>实际事件</h2>
+              <div className="log-list">{result?.events.map((event, index) => (
+                <button
+                  type="button"
+                  key={index}
+                  className={`log-row${clampedCursorTime === event.time ? " active" : ""}`}
+                  onClick={() => setCursorTime(event.time)}
+                ><b>t={event.time}</b> {event.node} → {String(event.value)} <span>{event.reason}</span></button>
+              ))}</div>
+              <h2>诊断</h2>
+              <div className="diagnostics">{result?.diagnostics.map((item, index) => <div key={index} className={item.severity}>t={item.time} {item.message}</div>)}{result && !result.diagnostics.length && <div className="ok">无断连或争用</div>}</div>
+            </>
+          )}
         </aside>
+        {resultsCollapsed && (
+          <button
+            type="button"
+            className="results-expand"
+            onClick={toggleResults}
+            title="展开结果面板"
+            aria-label="展开结果面板"
+          ><ChevronLeft size={16} /><span>结果面板</span></button>
+        )}
+        {!resultsCollapsed && (
+          <div
+            className="results-resizer"
+            style={{ right: resultsWidth - 4.5 }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖动调整结果面板宽度"
+            tabIndex={0}
+            onPointerDown={onResultsResizeStart}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const delta = event.key === "ArrowLeft" ? 24 : -24;
+              setResultsWidth((current) => {
+                const next = Math.min(720, Math.max(300, current + delta));
+                localStorage.setItem(RESULTS_WIDTH_KEY, String(next));
+                return next;
+              });
+            }}
+          />
+        )}
       </section>
     </main>
   );
 }
 
-function StatusCard({ result, current }: { result: SimulationResult; current: boolean }) {
+function StatusCard({
+  result,
+  current,
+  activePlan,
+  circuitFingerprint,
+}: {
+  result: SimulationResult;
+  current: boolean;
+  activePlan: StimulusPlan | null;
+  circuitFingerprint: string;
+}) {
   const text = result.status === "stable" ? "已稳定" : result.status === "oscillating" ? "持续振荡" : "已截断";
+  const circuitMatches = result.circuitFingerprint === circuitFingerprint;
   return (
     <div className={`status ${result.status}`}>
       <strong>{text}</strong>
-      <span>电路指纹 {shortFingerprint(result.fingerprint)}{current ? " · 与当前画布一致" : " · 与当前画布不一致"}</span>
+      <span>所属电路 {shortFingerprint(result.circuitFingerprint ?? result.fingerprint)}{current && circuitMatches ? " · 与当前画布一致" : " · 与当前画布不一致"}</span>
+      {activePlan && (
+        <span>所属输入方案：「{activePlan.name}」v{activePlan.version}（{shortFingerprint(result.stimulusFingerprint ?? "")}）</span>
+      )}
       <span>已处理 {result.processedEvents} 个事件；未处理 {result.pendingEvents} 个</span>
       {result.reason && <span>{result.reason}</span>}
     </div>
@@ -640,26 +891,20 @@ function firstChangeTimes(result: SimulationResult): Record<string, Record<strin
   return times;
 }
 
-function valueAtTime(trace: Array<{ time: number; value: LogicValue }>, time: number): LogicValue {
-  let value: LogicValue = trace[0]?.value ?? "x";
-  for (const point of trace) {
-    if (point.time <= time) value = point.value;
-  }
-  return value;
-}
-
 function PlanDiff({
   current,
   currentPlan,
   compare,
   comparePlan,
   inputIds,
+  onLocate,
 }: {
   current: SimulationResult | null;
   currentPlan: StimulusPlan | null;
   compare: SimulationResult | null;
   comparePlan: StimulusPlan | null;
   inputIds: string[];
+  onLocate: (time: number) => void;
 }) {
   if (!currentPlan || !comparePlan) return null;
   if (!current || !compare) {
@@ -669,14 +914,7 @@ function PlanDiff({
     ...Object.keys(current.waveforms).filter((nodeId) => !inputIds.includes(nodeId)),
     ...Object.keys(compare.waveforms).filter((nodeId) => !inputIds.includes(nodeId)),
   ])).sort();
-  const times = Array.from(new Set([
-    ...Object.values(current.waveforms).flatMap((trace) => trace.map((point) => point.time)),
-    ...Object.values(compare.waveforms).flatMap((trace) => trace.map((point) => point.time)),
-  ])).sort((left, right) => left - right);
-  const first = times.flatMap((time) => outputIds.map((nodeId) => ({ time, nodeId })))
-    .find(({ time, nodeId }) =>
-      String(valueAtTime(current.waveforms[nodeId] ?? [{ time: 0, value: "x" }], time))
-      !== String(valueAtTime(compare.waveforms[nodeId] ?? [{ time: 0, value: "x" }], time)));
+  const first = findFirstDifference(current, compare, outputIds);
   const relevantInputs = Array.from(new Set([
     ...(first ? inputIds.filter((nodeId) => String(currentPlan.initial?.[nodeId] ?? "x") !== String(comparePlan.initial?.[nodeId] ?? "x")) : []),
     ...currentPlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
@@ -684,9 +922,11 @@ function PlanDiff({
   ])).sort();
   return (
     <div className="revision-diff">
-      <div className={first ? "contention" : "ok"}>
-        {first ? `首次输出差异：t=${first.time}，节点 ${first.nodeId}` : "观测窗口内输出没有差异"}
-      </div>
+      {first ? (
+        <button type="button" className="locate-diff" onClick={() => onLocate(first.time)}>
+          <Crosshair size={14} /> 首次输出差异：t={first.time}，节点 {first.nodeId}（点击在波形上定位）
+        </button>
+      ) : <div className="ok">观测窗口内输出没有差异</div>}
       <table>
         <thead><tr><th>t</th><th>输入</th><th>{currentPlan.name}</th><th>{comparePlan.name}</th></tr></thead>
         <tbody>
@@ -706,7 +946,15 @@ function PlanDiff({
   );
 }
 
-function RevisionDiff({ current, baseline }: { current: SimulationResult | null; baseline: Baseline | null }) {
+function RevisionDiff({
+  current,
+  baseline,
+  onLocate,
+}: {
+  current: SimulationResult | null;
+  baseline: Baseline | null;
+  onLocate: (time: number) => void;
+}) {
   if (!current || !baseline) {
     return <div className="empty-panel">运行一个版本后，将其保存为基线；再改一个门延迟或一条连接并重新运行，即可叠加对照传播差异。</div>;
   }
@@ -728,6 +976,18 @@ function RevisionDiff({ current, baseline }: { current: SimulationResult | null;
   const sameStatus = current.status === baseline.result.status;
   return (
     <div className="revision-diff">
+      {(() => {
+        const allNodeIds = Array.from(new Set([
+          ...Object.keys(current.waveforms),
+          ...Object.keys(baseline.result.waveforms),
+        ])).sort();
+        const firstDiffPoint = findFirstDifference(current, baseline.result, allNodeIds);
+        return firstDiffPoint ? (
+          <button type="button" className="locate-diff" onClick={() => onLocate(firstDiffPoint.time)}>
+            <Crosshair size={14} /> 相对锁定基线的首个波形差异：t={firstDiffPoint.time}，节点 {firstDiffPoint.nodeId}
+          </button>
+        ) : current.fingerprint === baseline.fingerprint ? null : <div className="ok">观测窗口内波形没有差异</div>;
+      })()}
       <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {baseline.result.status}，当前 {current.status}{sameStatus ? "（一致）" : "（发生变化）"}</div>
       <table>
         <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th></tr></thead>

@@ -47,10 +47,16 @@ class CircuitStore:
         stimulus = payload.get("stimulus", {"events": []})
         plans = payload.get("plans")
         active_plan_id = payload.get("activePlanId")
+        compare_plan_id = payload.get("comparePlanId")
+        max_time = payload.get("maxTime")
+        cursor_time = payload.get("cursorTime")
+        baseline = payload.get("baseline")
         if not isinstance(circuit, dict):
             raise ValueError("circuit is required")
         if not isinstance(stimulus, dict):
             raise ValueError("stimulus must be an object")
+        if baseline is not None and not isinstance(baseline, dict):
+            raise ValueError("baseline must be an object")
         record = {
             "id": circuit_id,
             "name": name,
@@ -58,6 +64,10 @@ class CircuitStore:
             "stimulus": stimulus,
             "plans": plans,
             "activePlanId": active_plan_id,
+            "comparePlanId": compare_plan_id,
+            "maxTime": max_time,
+            "cursorTime": cursor_time,
+            "baseline": baseline,
             "updatedAt": int(time.time()),
         }
         with self._lock:
