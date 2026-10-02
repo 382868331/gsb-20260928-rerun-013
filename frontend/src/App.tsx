@@ -11,7 +11,7 @@ import {
   type Node,
   type NodeChange,
 } from "@xyflow/react";
-import { GitCompareArrows, Redo2, Trash2, Undo2 } from "lucide-react";
+import { GitCompareArrows, PanelRightClose, PanelRightOpen, Redo2, Trash2, Undo2 } from "lucide-react";
 import { api } from "./api";
 import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
 import { nodeTypes } from "./GateNode";
@@ -21,6 +21,7 @@ import type {
   CircuitNode,
   ExampleSummary,
   GateType,
+  LockedBaseline,
   LogicValue,
   SavedCircuit,
   SavedSummary,
@@ -39,8 +40,10 @@ type LoadedPayload = {
   stimulus?: Stimulus;
   plans?: StimulusPlan[];
   activePlanId?: string;
+  comparePlanId?: string;
+  baseline?: LockedBaseline | null;
 };
-type Baseline = { label: string; fingerprint: string; result: SimulationResult };
+type Baseline = LockedBaseline;
 type RunRecord = { fingerprint: string; status: "running" | "ready" | "error"; result?: SimulationResult; error?: string };
 type Snapshot = {
   nodes: Node[];
@@ -130,6 +133,7 @@ export function App() {
   const [savedId, setSavedId] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
   const [ready, setReady] = useState(false);
+  const [resultsCollapsed, setResultsCollapsed] = useState(false);
   const historyRef = useRef<Snapshot[]>([]);
   const futureRef = useRef<Snapshot[]>([]);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -269,15 +273,29 @@ export function App() {
     loadTokenRef.current = loadToken;
     const flow = toFlow(payload.circuit);
     const loadedPlans = normalizePlans(payload);
+    const restoredComparePlanId = payload.comparePlanId
+      && payload.comparePlanId !== loadedPlans.activePlanId
+      && loadedPlans.plans.some((plan) => plan.id === payload.comparePlanId)
+      ? payload.comparePlanId
+      : "";
+    const restoredBaseline = payload.baseline && payload.baseline.result?.waveforms
+      ? {
+          label: String(payload.baseline.label ?? "已锁定基线"),
+          fingerprint: String(payload.baseline.fingerprint ?? payload.baseline.result.fingerprint),
+          result: payload.baseline.result,
+        }
+      : null;
     setNodes(flow.nodes);
     setEdges(flow.edges);
     setPlans(loadedPlans.plans);
     setActivePlanId(loadedPlans.activePlanId);
-    setComparePlanId("");
+    setComparePlanId(restoredComparePlanId);
     setCircuitName(payload.name ?? "未命名电路");
     setSavedId(id);
-    setBaseline(null);
-    setRuns({});
+    setBaseline(restoredBaseline);
+    setRuns(restoredBaseline
+      ? { [restoredBaseline.fingerprint]: { fingerprint: restoredBaseline.fingerprint, status: "ready", result: restoredBaseline.result } }
+      : {});
     setRevision((value) => value + 1);
     setReady(true);
     historyRef.current = [];
@@ -392,6 +410,8 @@ export function App() {
       stimulus: planToStimulus(activePlan),
       plans,
       activePlanId,
+      comparePlanId: comparePlanId || undefined,
+      baseline,
     }, savedId);
     setSavedId(saved.id);
     setCircuitName(saved.name);
@@ -465,8 +485,12 @@ export function App() {
   };
 
   const keepBaseline = useCallback(() => {
-    if (result) setBaseline({ label: `修订 #${revision}`, fingerprint: result.fingerprint, result });
-  }, [result, revision]);
+    if (result) setBaseline({
+      label: `修订 #${revision} · ${activePlan?.name ?? "未命名方案"} v${activePlan?.version ?? 1}`,
+      fingerprint: result.fingerprint,
+      result,
+    });
+  }, [result, revision, activePlan]);
 
   const resultMatchesCurrent = result?.fingerprint === fingerprint;
   const resultForPlan = (plan: StimulusPlan) => {
@@ -497,7 +521,7 @@ export function App() {
         </div>
       </header>
 
-      <section className="workspace">
+      <section className={resultsCollapsed ? "workspace results-collapsed" : "workspace"}>
         <aside className="sidebar">
           <h2>元件</h2>
           <div className="gate-buttons">{gateTypes.map((type) => <button key={type} onClick={() => addNode(type)}>+ {type}</button>)}</div>
@@ -564,6 +588,13 @@ export function App() {
             <button onClick={redo} disabled={!canRedo} title="重做 (Ctrl+Shift+Z)"><Redo2 size={15} /></button>
             <label>观测窗口<input type="number" value={maxTime} min={1} onChange={(e) => { invalidate(); setMaxTime(Number(e.target.value)); }} /> ns</label>
             <button onClick={disconnectSelected}>断开选中连线</button>
+            <button
+              onClick={() => setResultsCollapsed((value) => !value)}
+              title={resultsCollapsed ? "展开结果面板" : "折叠结果面板"}
+              aria-expanded={!resultsCollapsed}
+            >
+              {resultsCollapsed ? <PanelRightOpen size={15} /> : <PanelRightClose size={15} />}
+            </button>
             <span className="revision">
               修订 #{revision} · 指纹 {fingerprint ? shortFingerprint(fingerprint) : "—"} · 
               {running ? "计算中" : currentRun?.status === "error" ? "结果被拒绝" : result ? "结果属于当前电路/方案" : "尚未运行"}
