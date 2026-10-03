@@ -63,7 +63,37 @@ export type SimulationResult = {
 
 export type ExampleSummary = { id: string; name: string; description: string };
 export type SavedSummary = { id: string; name: string; updatedAt: number };
-export type LockedBaseline = { label: string; fingerprint: string; result: SimulationResult };
+export type LockedBaseline = {
+  label: string;
+  fingerprint: string;
+  result: SimulationResult;
+  planId?: string;
+  planName?: string;
+  circuitFingerprint?: string;
+  stimulusFingerprint?: string;
+  maxTime?: number;
+};
+export type RunRecord = {
+  fingerprint: string;
+  status: "running" | "ready" | "error" | "stale";
+  result?: SimulationResult;
+  error?: string;
+  planId?: string;
+  planName?: string;
+};
+export type ViewState = {
+  maxTime: number;
+  cursorTime: number;
+  zoom: number;
+  panelWidth: number;
+  resultsCollapsed: boolean;
+  selection: {
+    time: number;
+    nodeId: string;
+    fingerprint: string;
+    reason: string;
+  } | null;
+};
 export type SavedCircuit = SavedSummary & {
   circuit: Circuit;
   stimulus?: Stimulus;
@@ -71,4 +101,6 @@ export type SavedCircuit = SavedSummary & {
   activePlanId?: string;
   comparePlanId?: string;
   baseline?: LockedBaseline | null;
+  runs?: Record<string, RunRecord>;
+  viewState?: ViewState;
 };

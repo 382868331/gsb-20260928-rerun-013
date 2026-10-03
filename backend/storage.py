@@ -49,6 +49,8 @@ class CircuitStore:
         active_plan_id = payload.get("activePlanId")
         compare_plan_id = payload.get("comparePlanId")
         baseline = payload.get("baseline")
+        runs = payload.get("runs")
+        view_state = payload.get("viewState")
         if not isinstance(circuit, dict):
             raise ValueError("circuit is required")
         if not isinstance(stimulus, dict):
@@ -68,6 +70,8 @@ class CircuitStore:
             "activePlanId": active_plan_id,
             "comparePlanId": compare_plan_id,
             "baseline": baseline,
+            "runs": runs if isinstance(runs, dict) else None,
+            "viewState": view_state if isinstance(view_state, dict) else None,
             "updatedAt": int(time.time()),
         }
         with self._lock:
