@@ -49,10 +49,20 @@ class CircuitStore:
         active_plan_id = payload.get("activePlanId")
         compare_plan_id = payload.get("comparePlanId")
         baseline = payload.get("baseline")
+        max_time = payload.get("maxTime")
+        cursor = payload.get("cursor")
         if not isinstance(circuit, dict):
             raise ValueError("circuit is required")
         if not isinstance(stimulus, dict):
             raise ValueError("stimulus must be an object")
+        if max_time is not None and not (isinstance(max_time, (int, float)) and max_time > 0):
+            raise ValueError("maxTime must be a positive number")
+        if cursor is not None and not (
+            isinstance(cursor, dict)
+            and isinstance(cursor.get("time"), (int, float))
+            and isinstance(cursor.get("fingerprint"), str)
+        ):
+            raise ValueError("cursor must contain a time and the fingerprint of its result")
         if baseline is not None and not (
             isinstance(baseline, dict)
             and isinstance(baseline.get("result"), dict)
@@ -68,6 +78,8 @@ class CircuitStore:
             "activePlanId": active_plan_id,
             "comparePlanId": compare_plan_id,
             "baseline": baseline,
+            "maxTime": max_time,
+            "cursor": cursor,
             "updatedAt": int(time.time()),
         }
         with self._lock:

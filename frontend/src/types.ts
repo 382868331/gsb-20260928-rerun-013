@@ -64,6 +64,7 @@ export type SimulationResult = {
 export type ExampleSummary = { id: string; name: string; description: string };
 export type SavedSummary = { id: string; name: string; updatedAt: number };
 export type LockedBaseline = { label: string; fingerprint: string; result: SimulationResult };
+export type CursorSelection = { time: number; fingerprint: string };
 export type SavedCircuit = SavedSummary & {
   circuit: Circuit;
   stimulus?: Stimulus;
@@ -71,4 +72,6 @@ export type SavedCircuit = SavedSummary & {
   activePlanId?: string;
   comparePlanId?: string;
   baseline?: LockedBaseline | null;
+  maxTime?: number;
+  cursor?: CursorSelection | null;
 };

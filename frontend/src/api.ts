@@ -1,4 +1,4 @@
-import type { Circuit, ExampleSummary, LockedBaseline, SavedCircuit, SavedSummary, SimulationResult, Stimulus, StimulusPlan } from "./types";
+import type { Circuit, CursorSelection, ExampleSummary, LockedBaseline, SavedCircuit, SavedSummary, SimulationResult, Stimulus, StimulusPlan } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -20,7 +20,7 @@ export const api = {
     }),
   saved: () => request<{ circuits: SavedSummary[] }>("/api/circuits"),
   load: (id: string) => request<SavedCircuit>(`/api/circuits/${id}`),
-  save: (payload: { name: string; circuit: Circuit; stimulus: Stimulus; plans?: StimulusPlan[]; activePlanId?: string; comparePlanId?: string; baseline?: LockedBaseline | null }, id?: string) =>
+  save: (payload: { name: string; circuit: Circuit; stimulus: Stimulus; plans?: StimulusPlan[]; activePlanId?: string; comparePlanId?: string; baseline?: LockedBaseline | null; maxTime?: number; cursor?: CursorSelection | null }, id?: string) =>
     request<SavedCircuit>(id ? `/api/circuits/${id}` : "/api/circuits", {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(payload),

@@ -15,10 +15,11 @@ import { GitCompareArrows, PanelRightClose, PanelRightOpen, Redo2, Trash2, Undo2
 import { api } from "./api";
 import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
 import { nodeTypes } from "./GateNode";
-import { WaveformPanel } from "./WaveformPanel";
+import { WaveformPanel, type LocateRequest } from "./WaveformPanel";
 import type {
   Circuit,
   CircuitNode,
+  CursorSelection,
   ExampleSummary,
   GateType,
   LockedBaseline,
@@ -42,9 +43,11 @@ type LoadedPayload = {
   activePlanId?: string;
   comparePlanId?: string;
   baseline?: LockedBaseline | null;
+  maxTime?: number;
+  cursor?: CursorSelection | null;
 };
 type Baseline = LockedBaseline;
-type RunRecord = { fingerprint: string; status: "running" | "ready" | "error"; result?: SimulationResult; error?: string };
+type RunRecord = { fingerprint: string; status: "running" | "ready" | "error"; result?: SimulationResult; error?: string; requestId?: number };
 type Snapshot = {
   nodes: Node[];
   edges: Edge[];
@@ -134,11 +137,15 @@ export function App() {
   const [revision, setRevision] = useState(0);
   const [ready, setReady] = useState(false);
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
+  const [cursor, setCursor] = useState<CursorSelection | null>(null);
+  const [locateRequest, setLocateRequest] = useState<LocateRequest | null>(null);
   const historyRef = useRef<Snapshot[]>([]);
   const futureRef = useRef<Snapshot[]>([]);
   const [historyVersion, setHistoryVersion] = useState(0);
   const loadTokenRef = useRef(0);
   const autoRunRef = useRef<{ token: number; planId: string } | null>(null);
+  const runSeqRef = useRef(0);
+  const locateSeqRef = useRef(0);
 
   const circuit = useMemo(() => toCircuit(nodes, edges), [nodes, edges]);
   const activePlan = useMemo(
@@ -236,9 +243,10 @@ export function App() {
     const expectedFingerprint = simulationFingerprint(circuit, requestStimulus, maxTime);
     const expectedCircuit = circuitFingerprint(circuit);
     const expectedStimulus = stimulusFingerprint(requestStimulus);
+    const requestId = ++runSeqRef.current;
     setRuns((current) => ({
       ...current,
-      [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "running" },
+      [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "running", requestId },
     }));
     try {
       const payload = await api.simulate(circuit, requestStimulus, maxTime);
@@ -246,21 +254,30 @@ export function App() {
         && payload.circuitFingerprint === expectedCircuit
         && payload.stimulusFingerprint === expectedStimulus;
       if (!accepted) {
-        setRuns((current) => ({
-          ...current,
-          [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "error", error: "仿真结果与当前电路/方案组合不一致，已丢弃。" },
-        }));
+        setRuns((current) => {
+          if (current[expectedFingerprint]?.requestId !== requestId) return current;
+          return {
+            ...current,
+            [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "error", error: "仿真结果与当前电路/方案组合不一致，已丢弃。", requestId },
+          };
+        });
         return;
       }
-      setRuns((current) => ({
-        ...current,
-        [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "ready", result: payload },
-      }));
+      setRuns((current) => {
+        if (current[expectedFingerprint]?.requestId !== requestId) return current;
+        return {
+          ...current,
+          [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "ready", result: payload, requestId },
+        };
+      });
     } catch (reason) {
-      setRuns((current) => ({
-        ...current,
-        [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "error", error: reason instanceof Error ? reason.message : String(reason) },
-      }));
+      setRuns((current) => {
+        if (current[expectedFingerprint]?.requestId !== requestId) return current;
+        return {
+          ...current,
+          [expectedFingerprint]: { fingerprint: expectedFingerprint, status: "error", error: reason instanceof Error ? reason.message : String(reason), requestId },
+        };
+      });
     }
   }, [activePlan, circuit, maxTime]);
 
@@ -285,6 +302,14 @@ export function App() {
           result: payload.baseline.result,
         }
       : null;
+    const restoredMaxTime = typeof payload.maxTime === "number" && payload.maxTime > 0
+      ? Math.round(payload.maxTime)
+      : null;
+    const restoredCursor = payload.cursor
+      && typeof payload.cursor.time === "number"
+      && typeof payload.cursor.fingerprint === "string"
+      ? { time: payload.cursor.time, fingerprint: payload.cursor.fingerprint }
+      : null;
     setNodes(flow.nodes);
     setEdges(flow.edges);
     setPlans(loadedPlans.plans);
@@ -293,6 +318,9 @@ export function App() {
     setCircuitName(payload.name ?? "未命名电路");
     setSavedId(id);
     setBaseline(restoredBaseline);
+    if (restoredMaxTime !== null) setMaxTime(restoredMaxTime);
+    setCursor(restoredCursor);
+    setLocateRequest(null);
     setRuns(restoredBaseline
       ? { [restoredBaseline.fingerprint]: { fingerprint: restoredBaseline.fingerprint, status: "ready", result: restoredBaseline.result } }
       : {});
@@ -412,6 +440,8 @@ export function App() {
       activePlanId,
       comparePlanId: comparePlanId || undefined,
       baseline,
+      maxTime,
+      cursor,
     }, savedId);
     setSavedId(saved.id);
     setCircuitName(saved.name);
@@ -502,6 +532,17 @@ export function App() {
   const waveformBaseline = comparePlan && compareResult
     ? { label: `${comparePlan.name} v${comparePlan.version}`, fingerprint: compareResult.fingerprint, result: compareResult }
     : baseline;
+  const shownResult = result ?? waveformBaseline?.result ?? null;
+  const handleCursorChange = useCallback((time: number) => {
+    if (!shownResult) return;
+    setCursor({ time, fingerprint: shownResult.fingerprint });
+  }, [shownResult]);
+  const handleLocate = useCallback((time: number, nodeId: string) => {
+    if (!result) return;
+    setCursor({ time, fingerprint: result.fingerprint });
+    setResultsCollapsed(false);
+    setLocateRequest({ time, nodeId, seq: ++locateSeqRef.current });
+  }, [result]);
   const canUndo = historyRef.current.length > 0;
   const canRedo = futureRef.current.length > 0;
 
@@ -633,9 +674,16 @@ export function App() {
           </div>
           {comparePlan && !compareResult && <div className="baseline-meta">{comparePlan.name} 尚未在当前电路修订上运行；点击“运行方案”。</div>}
           {waveformBaseline && <div className="baseline-meta">虚线基线：{waveformBaseline.label}（{shortFingerprint(waveformBaseline.fingerprint)}）</div>}
-          <WaveformPanel result={result} baseline={waveformBaseline} />
-          <PlanDiff current={result} currentPlan={activePlan} compare={compareResult} comparePlan={comparePlan} inputIds={inputs.map((input) => input.id)} />
-          {!comparePlan && <RevisionDiff current={result} baseline={baseline} />}
+          <WaveformPanel
+            result={result}
+            baseline={waveformBaseline}
+            cursor={cursor}
+            windowMaxTime={maxTime}
+            onCursorChange={handleCursorChange}
+            locateRequest={locateRequest}
+          />
+          <PlanDiff current={result} currentPlan={activePlan} compare={compareResult} comparePlan={comparePlan} inputIds={inputs.map((input) => input.id)} onLocate={handleLocate} />
+          {!comparePlan && <RevisionDiff current={result} baseline={baseline} onLocate={handleLocate} />}
           <h2>实际事件</h2>
           <div className="log-list">{result?.events.map((event, index) => <div key={index}><b>t={event.time}</b> {event.node} → {String(event.value)} <span>{event.reason}</span></div>)}</div>
           <h2>诊断</h2>
@@ -685,12 +733,14 @@ function PlanDiff({
   compare,
   comparePlan,
   inputIds,
+  onLocate,
 }: {
   current: SimulationResult | null;
   currentPlan: StimulusPlan | null;
   compare: SimulationResult | null;
   comparePlan: StimulusPlan | null;
   inputIds: string[];
+  onLocate?: (time: number, nodeId: string) => void;
 }) {
   if (!currentPlan || !comparePlan) return null;
   if (!current || !compare) {
@@ -717,6 +767,11 @@ function PlanDiff({
     <div className="revision-diff">
       <div className={first ? "contention" : "ok"}>
         {first ? `首次输出差异：t=${first.time}，节点 ${first.nodeId}` : "观测窗口内输出没有差异"}
+        {first && onLocate && (
+          <button className="locate-btn" onClick={() => onLocate(first.time, first.nodeId)}>
+            定位到 t={first.time} · {first.nodeId}
+          </button>
+        )}
       </div>
       <table>
         <thead><tr><th>t</th><th>输入</th><th>{currentPlan.name}</th><th>{comparePlan.name}</th></tr></thead>
@@ -737,7 +792,7 @@ function PlanDiff({
   );
 }
 
-function RevisionDiff({ current, baseline }: { current: SimulationResult | null; baseline: Baseline | null }) {
+function RevisionDiff({ current, baseline, onLocate }: { current: SimulationResult | null; baseline: Baseline | null; onLocate?: (time: number, nodeId: string) => void }) {
   if (!current || !baseline) {
     return <div className="empty-panel">运行一个版本后，将其保存为基线；再改一个门延迟或一条连接并重新运行，即可叠加对照传播差异。</div>;
   }
@@ -761,7 +816,7 @@ function RevisionDiff({ current, baseline }: { current: SimulationResult | null;
     <div className="revision-diff">
       <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {baseline.result.status}，当前 {current.status}{sameStatus ? "（一致）" : "（发生变化）"}</div>
       <table>
-        <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th></tr></thead>
+        <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th><th></th></tr></thead>
         <tbody>
           {rows.map((row, index) => (
             <tr key={`${row.nodeId}-${row.value}-${index}`}>
@@ -769,6 +824,11 @@ function RevisionDiff({ current, baseline }: { current: SimulationResult | null;
               <td>{row.baseTime ?? "—"}</td><td>{row.currentTime ?? "—"}</td>
               <td className={row.delta === undefined ? "" : row.delta > 0 ? "later" : "earlier"}>
                 {row.delta === undefined ? "新增/消失" : row.delta > 0 ? `+${row.delta}` : row.delta}
+              </td>
+              <td>
+                {onLocate && (row.currentTime ?? row.baseTime) !== undefined && (
+                  <button className="locate-btn" onClick={() => onLocate((row.currentTime ?? row.baseTime)!, row.nodeId)}>定位</button>
+                )}
               </td>
             </tr>
           ))}
