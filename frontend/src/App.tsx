@@ -694,13 +694,28 @@ export function App() {
   );
 }
 
+function statusLabel(status: SimulationResult["status"]): string {
+  switch (status) {
+    case "stable": return "已稳定";
+    case "window_exceeded": return "观察窗口结束，仍有未来事件";
+    case "oscillating": return "持续振荡";
+    default: return "无法判定";
+  }
+}
+
 function StatusCard({ result, current }: { result: SimulationResult; current: boolean }) {
-  const text = result.status === "stable" ? "已稳定" : result.status === "oscillating" ? "持续振荡" : "已截断";
+  const text = statusLabel(result.status);
   return (
     <div className={`status ${result.status}`}>
       <strong>{text}</strong>
       <span>电路指纹 {shortFingerprint(result.fingerprint)}{current ? " · 与当前画布一致" : " · 与当前画布不一致"}</span>
       <span>已处理 {result.processedEvents} 个事件；未处理 {result.pendingEvents} 个</span>
+      {result.status === "window_exceeded" && result.settledTime != null && (
+        <span>剩余事件只是发生在观察截止之后，电路于 t={result.settledTime} 稳定，并非振荡；扩大窗口可复验。</span>
+      )}
+      {result.status === "stable" && result.settledTime != null && result.settledTime > 0 && (
+        <span>最后一次事件在 t={result.settledTime}，此后队列已清空。</span>
+      )}
       {result.reason && <span>{result.reason}</span>}
     </div>
   );
@@ -814,7 +829,7 @@ function RevisionDiff({ current, baseline, onLocate }: { current: SimulationResu
   const sameStatus = current.status === baseline.result.status;
   return (
     <div className="revision-diff">
-      <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {baseline.result.status}，当前 {current.status}{sameStatus ? "（一致）" : "（发生变化）"}</div>
+      <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {statusLabel(baseline.result.status)}，当前 {statusLabel(current.status)}{sameStatus ? "（一致）" : "（发生变化）"}</div>
       <table>
         <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th><th></th></tr></thead>
         <tbody>

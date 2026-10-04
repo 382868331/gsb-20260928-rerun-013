@@ -117,8 +117,9 @@ h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: #
   color: white;
 }
 .status.stable { background: #059669; }
+.status.window_exceeded { background: #2563eb; }
 .status.oscillating { background: #d97706; }
-.status.truncated { background: #dc2626; }
+.status.unknown { background: #dc2626; }
 .error {
   background: #fef2f2;
   color: #b91c1c;

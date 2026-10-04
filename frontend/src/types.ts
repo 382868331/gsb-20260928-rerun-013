@@ -49,7 +49,8 @@ export type SimulationResult = {
   fingerprint: string;
   circuitFingerprint?: string;
   stimulusFingerprint?: string;
-  status: "stable" | "oscillating" | "truncated";
+  status: "stable" | "window_exceeded" | "oscillating" | "unknown";
+  settledTime?: number | null;
   maxTime: number;
   processedEvents: number;
   pendingEvents: number;

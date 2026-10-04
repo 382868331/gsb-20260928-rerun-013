@@ -139,3 +139,49 @@ def test_stimulus_initial_values_are_part_of_plan_fingerprint():
     second = simulate(example["circuit"], changed, max_time=40)
     assert second["circuitFingerprint"] == first["circuitFingerprint"]
     assert second["stimulusFingerprint"] != first["stimulusFingerprint"]
+
+
+def test_short_window_on_combinational_is_window_exceeded_not_oscillation():
+    example = get_example("combinational")
+    wide = simulate(example["circuit"], example["stimulus"], max_time=311)
+    assert wide["status"] == "stable"
+    assert wide["pendingEvents"] == 0
+
+    narrow = simulate(example["circuit"], example["stimulus"], max_time=20)
+    assert narrow["status"] == "window_exceeded"
+    assert narrow["pendingEvents"] > 0
+    assert narrow["settledTime"] == wide["settledTime"] == 130
+    assert narrow["events"] == wide["events"][: len(narrow["events"])]
+
+
+def test_feedback_latch_short_and_long_windows_agree_on_stability():
+    example = get_example("latch")
+    wide = simulate(example["circuit"], example["stimulus"], max_time=180)
+    assert wide["status"] == "stable"
+
+    narrow = simulate(example["circuit"], example["stimulus"], max_time=30)
+    assert narrow["status"] == "window_exceeded"
+    assert narrow["pendingEvents"] > 0
+    assert narrow["settledTime"] == wide["settledTime"]
+
+    medium = simulate(example["circuit"], example["stimulus"], max_time=160)
+    assert medium["status"] == "stable"
+    assert medium["settledTime"] == wide["settledTime"]
+
+
+def test_not_ring_is_oscillating_in_short_and_long_windows():
+    example = get_example("oscillator")
+    for window in (20, 311):
+        result = simulate(example["circuit"], example["stimulus"], max_time=window)
+        assert result["status"] == "oscillating"
+        assert result["pendingEvents"] > 0
+        assert result["settledTime"] is None
+
+
+def test_window_change_does_not_change_stimulus_or_circuit_fingerprint():
+    example = get_example("combinational")
+    narrow = simulate(example["circuit"], example["stimulus"], max_time=20)
+    wide = simulate(example["circuit"], example["stimulus"], max_time=311)
+    assert narrow["circuitFingerprint"] == wide["circuitFingerprint"]
+    assert narrow["stimulusFingerprint"] == wide["stimulusFingerprint"]
+    assert narrow["fingerprint"] != wide["fingerprint"]

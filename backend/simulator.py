@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from heapq import heappop, heappush
+from heapq import heapify, heappop, heappush
 from itertools import count
 from typing import Any
 
@@ -325,6 +325,7 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
 
     processed = 0
     truncated_reason = ""
+    last_event_time = 0
     while queue:
         pending = heappop(queue)
         if pending.time > max_time:
@@ -334,6 +335,7 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
         if processed > max_events:
             truncated_reason = f"超过最大事件数 {max_events}"
             break
+        last_event_time = pending.time
 
         if pending.kind == "input":
             new_value = pending.payload["value"]
@@ -355,16 +357,80 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
 
     pending_events = len(queue)
     changed_nodes = sorted({event["node"] for event in event_log})
-    oscillating = pending_events > 0 and bool(event_log) and not truncated_reason
-    status = "oscillating" if oscillating else "stable"
+
+    def probe_beyond_window() -> int | None:
+        probe_queue = list(queue)
+        heapify(probe_queue)
+        probe_states = dict(states)
+        probe_ports = {node_id: dict(ports) for node_id, ports in input_ports.items()}
+        probe_processed = 0
+        probe_last_time = last_event_time
+
+        def probe_refresh_sink(target_id: str, target_port: str, time: int) -> None:
+            drivers = sink_drivers.get((target_id, target_port), [])
+            values = [probe_states[driver] for driver in drivers]
+            if ZERO in values and ONE in values:
+                value = UNKNOWN
+            elif any(item == UNKNOWN for item in values):
+                value = UNKNOWN
+            else:
+                value = values[0] if values else UNKNOWN
+            if probe_ports[target_id][target_port] == value:
+                return
+            probe_ports[target_id][target_port] = value
+            target = nodes[target_id]
+            if target["type"] != "INPUT":
+                heappush(
+                    probe_queue,
+                    PendingEvent(time + target["delay"], next(sequence), "gate", target_id, {"cause": target_port}),
+                )
+
+        while probe_queue:
+            pending = heappop(probe_queue)
+            probe_processed += 1
+            if probe_processed > max_events:
+                return None
+            probe_last_time = pending.time
+            if pending.kind == "input":
+                new_value = pending.payload["value"]
+                if probe_states[pending.key] != new_value:
+                    probe_states[pending.key] = new_value
+                    for target_id, target_port in outgoing[pending.key]:
+                        probe_refresh_sink(target_id, target_port, pending.time)
+                continue
+            node_id = pending.key
+            node = nodes[node_id]
+            new_value = (
+                pending.payload["initial_value"]
+                if pending.payload.get("cause") == "initialization"
+                else evaluate_gate(node, probe_ports[node_id])
+            )
+            if probe_states[node_id] != new_value:
+                probe_states[node_id] = new_value
+                for target_id, target_port in outgoing[node_id]:
+                    probe_refresh_sink(target_id, target_port, pending.time)
+        return probe_last_time
+
+    settled_time: int | None = None
     if truncated_reason:
-        status = "truncated"
+        status = "unknown"
+    elif pending_events == 0:
+        status = "stable"
+        settled_time = last_event_time
+    else:
+        probe_settled = probe_beyond_window()
+        if probe_settled is None:
+            status = "oscillating"
+        else:
+            status = "window_exceeded"
+            settled_time = probe_settled
 
     return {
         "fingerprint": simulation_fingerprint(nodes, edges, initial_inputs, scheduled_input_events, max_time),
         "circuitFingerprint": circuit_fingerprint({node_id: {**node, "initial": original_initial[node_id]} for node_id, node in nodes.items()}, edges),
         "stimulusFingerprint": stimulus_fingerprint(initial_inputs, scheduled_input_events),
         "status": status,
+        "settledTime": settled_time,
         "maxTime": max_time,
         "processedEvents": processed,
         "pendingEvents": pending_events,

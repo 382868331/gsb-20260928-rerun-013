@@ -124,3 +124,29 @@ def test_out_of_order_run_results_keep_their_own_combination(tmp_path):
     late_narrow = simulate(circuit, stimulus, max_time=80)
     assert late_narrow["fingerprint"] == narrow["fingerprint"]
     assert late_narrow["fingerprint"] != loaded["cursor"]["fingerprint"]
+
+
+def test_window_exceeded_result_and_cursor_survive_save_and_reopen(tmp_path):
+    example = get_example("combinational")
+    narrow = simulate(example["circuit"], example["stimulus"], max_time=20)
+    assert narrow["status"] == "window_exceeded"
+
+    store = CircuitStore(tmp_path / "circuits.json")
+    saved = store.save({
+        "name": "短窗口组合电路",
+        "circuit": example["circuit"],
+        "stimulus": example["stimulus"],
+        "maxTime": 20,
+        "cursor": {"time": 20, "fingerprint": narrow["fingerprint"]},
+        "baseline": {"label": "短窗口", "fingerprint": narrow["fingerprint"], "result": narrow},
+    })
+
+    loaded = CircuitStore(tmp_path / "circuits.json").get(saved["id"])
+    assert loaded["baseline"]["result"]["status"] == "window_exceeded"
+    assert loaded["baseline"]["result"]["settledTime"] == narrow["settledTime"]
+    assert loaded["cursor"] == {"time": 20, "fingerprint": narrow["fingerprint"]}
+
+    widened = simulate(loaded["circuit"], loaded["stimulus"], max_time=311)
+    assert widened["status"] == "stable"
+    assert widened["settledTime"] == loaded["baseline"]["result"]["settledTime"]
+    assert widened["circuitFingerprint"] == loaded["baseline"]["result"]["circuitFingerprint"]
