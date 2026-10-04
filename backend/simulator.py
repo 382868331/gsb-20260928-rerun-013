@@ -20,6 +20,11 @@ GATE_INPUTS = {
 }
 GATE_OUTPUT = "out"
 
+STATUS_STABLE = "stable"
+STATUS_FUTURE_EVENTS = "future_events"
+STATUS_OSCILLATING = "oscillating"
+STATUS_UNKNOWN = "unknown"
+
 
 class CircuitError(ValueError):
     pass
@@ -195,6 +200,27 @@ def evaluate_gate(node: dict[str, Any], input_values: dict[str, Any]) -> Any:
     return _binary(node_type, input_values.get("in1", UNKNOWN), input_values.get("in2", UNKNOWN))
 
 
+def feedback_nodes(nodes: dict[str, dict[str, Any]], edges: list[dict[str, str]]) -> set[str]:
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in nodes}
+    for edge in edges:
+        outgoing[edge["source"]].append(edge["target"])
+
+    cyclic_nodes: set[str] = set()
+    for start in nodes:
+        stack = list(outgoing[start])
+        seen = {start}
+        while stack:
+            node_id = stack.pop()
+            if node_id == start:
+                cyclic_nodes.add(start)
+                break
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            stack.extend(outgoing[node_id])
+    return cyclic_nodes
+
+
 def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *, max_time: int = 160, max_events: int = 20000) -> dict[str, Any]:
     nodes, edges = validate_circuit(circuit)
     stimulus = stimulus or {}
@@ -355,16 +381,40 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
 
     pending_events = len(queue)
     changed_nodes = sorted({event["node"] for event in event_log})
-    oscillating = pending_events > 0 and bool(event_log) and not truncated_reason
-    status = "oscillating" if oscillating else "stable"
+    next_event_time = queue[0].time if queue else None
+    feedback_nodes_in_circuit = feedback_nodes(nodes, edges)
+    feedback_changed_nodes = feedback_nodes_in_circuit & set(changed_nodes)
     if truncated_reason:
-        status = "truncated"
+        status = STATUS_UNKNOWN
+        diagnostic = truncated_reason
+    elif pending_events == 0:
+        status = STATUS_STABLE
+        diagnostic = "事件队列已清空，电路已稳定"
+    elif not feedback_nodes_in_circuit:
+        status = STATUS_FUTURE_EVENTS
+        diagnostic = f"观测窗口在 {max_time} 结束，仍有 {pending_events} 个发生在窗口之后的未来事件；电路没有反馈回路"
+    else:
+        repeated_feedback_changes = {
+            node_id
+            for node_id in feedback_changed_nodes
+            if sum(1 for event in event_log if event["node"] == node_id) >= 2
+        }
+        pending_nodes = {event.key for event in queue if event.kind == "gate"}
+        oscillating_nodes = repeated_feedback_changes & pending_nodes
+        if oscillating_nodes:
+            status = STATUS_OSCILLATING
+            names = ", ".join(sorted(oscillating_nodes))
+            diagnostic = f"反馈节点 {names} 在观测窗口内重复翻转，且仍有未来事件，确认持续振荡"
+        else:
+            status = STATUS_UNKNOWN
+            diagnostic = f"反馈回路尚未在观测窗口内出现可确认的重复翻转，下一个事件在 t={next_event_time}；扩大窗口后再判定"
 
     return {
         "fingerprint": simulation_fingerprint(nodes, edges, initial_inputs, scheduled_input_events, max_time),
         "circuitFingerprint": circuit_fingerprint({node_id: {**node, "initial": original_initial[node_id]} for node_id, node in nodes.items()}, edges),
         "stimulusFingerprint": stimulus_fingerprint(initial_inputs, scheduled_input_events),
         "status": status,
+        "diagnostic": diagnostic,
         "maxTime": max_time,
         "processedEvents": processed,
         "pendingEvents": pending_events,
@@ -373,5 +423,7 @@ def simulate(circuit: dict[str, Any], stimulus: dict[str, Any] | None = None, *,
         "events": event_log,
         "diagnostics": diagnostics,
         "finalValues": states,
-        "reason": truncated_reason,
+        "nextEventTime": next_event_time,
+        "feedbackNodes": sorted(feedback_nodes_in_circuit),
+        "reason": diagnostic if truncated_reason else "",
     }

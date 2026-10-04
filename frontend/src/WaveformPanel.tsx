@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CursorSelection, LogicValue, SimulationResult } from "./types";
-import { shortFingerprint } from "./fingerprint";
+import { sameSimulationSource, shortFingerprint } from "./fingerprint";
 
 const rowHeight = 44;
 const leftWidth = 118;
@@ -85,7 +85,9 @@ export function WaveformPanel({
     ...Object.keys(result?.waveforms ?? {}),
     ...Object.keys(baseline?.result.waveforms ?? {}),
   ])).sort();
-  const cursorVisible = cursor != null && cursor.fingerprint === shown.fingerprint;
+  const cursorExact = cursor != null && cursor.fingerprint === shown.fingerprint;
+  const cursorReusable = cursor != null && sameSimulationSource(cursor.fingerprint, shown.fingerprint);
+  const cursorVisible = cursorExact || cursorReusable;
   const cursorOutOfWindow = cursor != null && windowMaxTime !== undefined && cursor.time > windowMaxTime;
   const cursorX = cursor && maxTime > 0 ? timeToX(cursor.time, maxTime) : 0;
 
@@ -118,7 +120,10 @@ export function WaveformPanel({
         </div>
       )}
       {cursorVisible && !cursorOutOfWindow && (
-        <div className="cursor-note cursor-note-ok">选择时刻 t={cursor.time}（{shortFingerprint(shown.fingerprint)}）</div>
+        <div className="cursor-note cursor-note-ok">
+          选择时刻 t={cursor.time}；结果来源 {shortFingerprint(cursor.fingerprint!)}
+          {!cursorExact && <>，当前核对结果 {shortFingerprint(shown.fingerprint)}</>}
+        </div>
       )}
       {baseline && (
         <div className="wave-legend">

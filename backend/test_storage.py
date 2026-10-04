@@ -124,3 +124,33 @@ def test_out_of_order_run_results_keep_their_own_combination(tmp_path):
     late_narrow = simulate(circuit, stimulus, max_time=80)
     assert late_narrow["fingerprint"] == narrow["fingerprint"]
     assert late_narrow["fingerprint"] != loaded["cursor"]["fingerprint"]
+
+
+@pytest.mark.parametrize(("example_id", "max_time", "expected_status"), [
+    ("combinational", 20, "future_events"),
+    ("combinational", 311, "stable"),
+    ("latch", 20, "unknown"),
+    ("latch", 180, "stable"),
+    ("oscillator", 20, "oscillating"),
+    ("oscillator", 80, "oscillating"),
+])
+def test_status_and_cursor_source_round_trip_for_examples(tmp_path, example_id, max_time, expected_status):
+    example = get_example(example_id)
+    result = simulate(example["circuit"], example["stimulus"], max_time=max_time)
+    assert result["status"] == expected_status
+    cursor = {"time": min(8, max_time), "fingerprint": result["fingerprint"]}
+    store = CircuitStore(tmp_path / "circuits.json")
+    saved = store.save({
+        "name": example_id,
+        "circuit": example["circuit"],
+        "stimulus": example["stimulus"],
+        "maxTime": max_time,
+        "cursor": cursor,
+        "baseline": {"label": "当前结果", "fingerprint": result["fingerprint"], "result": result},
+    })
+
+    loaded = CircuitStore(tmp_path / "circuits.json").get(saved["id"])
+    assert loaded["maxTime"] == max_time
+    assert loaded["cursor"] == cursor
+    assert loaded["baseline"]["result"]["status"] == expected_status
+    assert loaded["baseline"]["result"]["diagnostic"] == result["diagnostic"]

@@ -49,7 +49,8 @@ export type SimulationResult = {
   fingerprint: string;
   circuitFingerprint?: string;
   stimulusFingerprint?: string;
-  status: "stable" | "oscillating" | "truncated";
+  status: "stable" | "future_events" | "oscillating" | "unknown";
+  diagnostic?: string;
   maxTime: number;
   processedEvents: number;
   pendingEvents: number;
@@ -59,6 +60,8 @@ export type SimulationResult = {
   diagnostics: Diagnostic[];
   finalValues: Record<string, LogicValue>;
   reason?: string;
+  nextEventTime?: number | null;
+  feedbackNodes?: string[];
 };
 
 export type ExampleSummary = { id: string; name: string; description: string };

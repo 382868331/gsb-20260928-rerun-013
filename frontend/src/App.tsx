@@ -13,7 +13,7 @@ import {
 } from "@xyflow/react";
 import { GitCompareArrows, PanelRightClose, PanelRightOpen, Redo2, Trash2, Undo2 } from "lucide-react";
 import { api } from "./api";
-import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
+import { circuitFingerprint, sameSimulationSource, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
 import { nodeTypes } from "./GateNode";
 import { WaveformPanel, type LocateRequest } from "./WaveformPanel";
 import type {
@@ -54,6 +54,31 @@ type Snapshot = {
   plans: StimulusPlan[];
   activePlanId: string;
 };
+
+const statusText: Record<SimulationResult["status"], string> = {
+  stable: "已稳定",
+  future_events: "窗口结束，仍有未来事件",
+  oscillating: "持续振荡",
+  unknown: "无法判定",
+};
+
+function describeStatus(result: SimulationResult): string {
+  return result.diagnostic || statusText[result.status];
+}
+
+function compareStatus(current: SimulationResult, baselineResult: SimulationResult): { same: boolean; message: string } {
+  if (current.status === baselineResult.status) {
+    return { same: true, message: `诊断一致：${describeStatus(current)}` };
+  }
+  const inconclusive = (result: SimulationResult) => result.status === "future_events" || result.status === "unknown";
+  if (inconclusive(current) || inconclusive(baselineResult)) {
+    const suffix = sameSimulationSource(current.fingerprint, baselineResult.fingerprint)
+      ? `；这是观测窗口（${baselineResult.maxTime} ns → ${current.maxTime} ns）造成的证据范围变化，不能解释为稳定性改变`
+      : "；至少一份修订尚未形成确定性结论"
+    return { same: false, message: `基线：${describeStatus(baselineResult)}；当前：${describeStatus(current)}${suffix}` };
+  }
+  return { same: false, message: `稳定性诊断发生变化：基线 ${statusText[baselineResult.status]}，当前 ${statusText[current.status]}` };
+}
 
 function toCircuit(nodes: Node[], edges: Edge[]): Circuit {
   return {
@@ -695,13 +720,12 @@ export function App() {
 }
 
 function StatusCard({ result, current }: { result: SimulationResult; current: boolean }) {
-  const text = result.status === "stable" ? "已稳定" : result.status === "oscillating" ? "持续振荡" : "已截断";
   return (
     <div className={`status ${result.status}`}>
-      <strong>{text}</strong>
+      <strong>{statusText[result.status]}</strong>
       <span>电路指纹 {shortFingerprint(result.fingerprint)}{current ? " · 与当前画布一致" : " · 与当前画布不一致"}</span>
       <span>已处理 {result.processedEvents} 个事件；未处理 {result.pendingEvents} 个</span>
-      {result.reason && <span>{result.reason}</span>}
+      <span>{describeStatus(result)}</span>
     </div>
   );
 }
@@ -763,8 +787,10 @@ function PlanDiff({
     ...currentPlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
     ...comparePlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
   ])).sort();
+  const statusComparison = compareStatus(current, compare);
   return (
     <div className="revision-diff">
+      <div className={statusComparison.same ? "ok" : "contention"}>{statusComparison.message}</div>
       <div className={first ? "contention" : "ok"}>
         {first ? `首次输出差异：t=${first.time}，节点 ${first.nodeId}` : "观测窗口内输出没有差异"}
         {first && onLocate && (
@@ -811,10 +837,10 @@ function RevisionDiff({ current, baseline, onLocate }: { current: SimulationResu
       return { nodeId, value, baseTime, currentTime, delta };
     });
   }).filter((row) => row.delta !== 0 || row.baseTime === undefined || row.currentTime === undefined);
-  const sameStatus = current.status === baseline.result.status;
+  const statusComparison = compareStatus(current, baseline.result);
   return (
     <div className="revision-diff">
-      <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {baseline.result.status}，当前 {current.status}{sameStatus ? "（一致）" : "（发生变化）"}</div>
+      <div className={statusComparison.same ? "ok" : "contention"}>{statusComparison.message}</div>
       <table>
         <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th><th></th></tr></thead>
         <tbody>

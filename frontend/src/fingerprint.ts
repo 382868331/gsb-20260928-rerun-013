@@ -58,6 +58,18 @@ export function simulationFingerprint(circuit: Circuit, stimulus: Stimulus, maxT
   });
 }
 
+export function sameSimulationSource(left: string, right: string): boolean {
+  if (left === right) return true;
+  try {
+    const leftPayload = JSON.parse(left) as { circuit?: unknown; stimulus?: unknown };
+    const rightPayload = JSON.parse(right) as { circuit?: unknown; stimulus?: unknown };
+    return canonical(leftPayload.circuit) === canonical(rightPayload.circuit)
+      && canonical(leftPayload.stimulus) === canonical(rightPayload.stimulus);
+  } catch {
+    return false;
+  }
+}
+
 export function shortFingerprint(fingerprint: string): string {
   let hash = 5381;
   for (let index = 0; index < fingerprint.length; index += 1) {

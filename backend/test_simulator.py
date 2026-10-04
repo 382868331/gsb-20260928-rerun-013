@@ -35,6 +35,39 @@ def test_feedback_loop_without_stable_point_is_oscillating():
     assert changes == [8, 16, 24, 32, 40, 48, 56, 64, 72, 80]
 
 
+def test_observation_window_distinguishes_future_events_oscillation_and_unknown():
+    combinational = get_example("combinational")
+    short_combinational = simulate(combinational["circuit"], combinational["stimulus"], max_time=20)
+    long_combinational = simulate(combinational["circuit"], combinational["stimulus"], max_time=311)
+    assert short_combinational["status"] == "future_events"
+    assert short_combinational["pendingEvents"] == 5
+    assert short_combinational["nextEventTime"] == 25
+    assert long_combinational["status"] == "stable"
+    assert long_combinational["pendingEvents"] == 0
+
+    latch = get_example("latch")
+    short_latch = simulate(latch["circuit"], latch["stimulus"], max_time=20)
+    long_latch = simulate(latch["circuit"], latch["stimulus"], max_time=180)
+    assert short_latch["status"] == "unknown"
+    assert short_latch["pendingEvents"] == 5
+    assert long_latch["status"] == "stable"
+    assert long_latch["pendingEvents"] == 0
+
+    oscillator = get_example("oscillator")
+    short_oscillator = simulate(oscillator["circuit"], oscillator["stimulus"], max_time=20)
+    long_oscillator = simulate(oscillator["circuit"], oscillator["stimulus"], max_time=80)
+    assert short_oscillator["status"] == "oscillating"
+    assert long_oscillator["status"] == "oscillating"
+    assert short_oscillator["pendingEvents"] == long_oscillator["pendingEvents"] == 1
+
+
+def test_event_limit_returns_unknown_instead_of_stable_or_oscillating():
+    oscillator = get_example("oscillator")
+    result = simulate(oscillator["circuit"], oscillator["stimulus"], max_time=80, max_events=3)
+    assert result["status"] == "unknown"
+    assert "最大事件数" in result["diagnostic"]
+
+
 def test_disconnected_input_and_multiple_drivers_are_visible():
     example = get_example("faults")
     result = simulate(example["circuit"], example["stimulus"], max_time=40)
