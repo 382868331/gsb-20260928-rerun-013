@@ -14,6 +14,7 @@ import {
 import { GitCompareArrows, PanelRightClose, PanelRightOpen, Redo2, Trash2, Undo2 } from "lucide-react";
 import { api } from "./api";
 import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
+import { behaviorLabel, compareStability, interpretStability, observationLabel } from "./stability";
 import { nodeTypes } from "./GateNode";
 import { WaveformPanel, type LocateRequest } from "./WaveformPanel";
 import type {
@@ -703,13 +704,22 @@ function statusLabel(status: SimulationResult["status"]): string {
   }
 }
 
+function stabilityClassName(kind: "same" | "observation-only" | "changed" | "indeterminate"): string {
+  if (kind === "changed") return "contention";
+  if (kind === "observation-only") return "stability-note";
+  if (kind === "indeterminate") return "error";
+  return "ok";
+}
+
 function StatusCard({ result, current }: { result: SimulationResult; current: boolean }) {
   const text = statusLabel(result.status);
+  const interpretation = interpretStability(result);
   return (
     <div className={`status ${result.status}`}>
       <strong>{text}</strong>
       <span>电路指纹 {shortFingerprint(result.fingerprint)}{current ? " · 与当前画布一致" : " · 与当前画布不一致"}</span>
       <span>已处理 {result.processedEvents} 个事件；未处理 {result.pendingEvents} 个</span>
+      <span>电路行为：{behaviorLabel(interpretation.behavior)}；{observationLabel(interpretation.observation)}</span>
       {result.status === "window_exceeded" && result.settledTime != null && (
         <span>剩余事件只是发生在观察截止之后，电路于 t={result.settledTime} 稳定，并非振荡；扩大窗口可复验。</span>
       )}
@@ -778,8 +788,15 @@ function PlanDiff({
     ...currentPlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
     ...comparePlan.events.filter((event) => !first || event.time <= first.time).map((event) => event.node),
   ])).sort();
+  const stability = compareStability(compare, current);
   return (
     <div className="revision-diff">
+      <div className={stabilityClassName(stability.kind)}>
+        {comparePlan.name}：{behaviorLabel(interpretStability(compare).behavior)}；{statusLabel(compare.status)}
+        <br />
+        {currentPlan.name}：{behaviorLabel(interpretStability(current).behavior)}；{statusLabel(current.status)}
+        <br />{stability.message}
+      </div>
       <div className={first ? "contention" : "ok"}>
         {first ? `首次输出差异：t=${first.time}，节点 ${first.nodeId}` : "观测窗口内输出没有差异"}
         {first && onLocate && (
@@ -826,10 +843,15 @@ function RevisionDiff({ current, baseline, onLocate }: { current: SimulationResu
       return { nodeId, value, baseTime, currentTime, delta };
     });
   }).filter((row) => row.delta !== 0 || row.baseTime === undefined || row.currentTime === undefined);
-  const sameStatus = current.status === baseline.result.status;
+  const stability = compareStability(baseline.result, current);
   return (
     <div className="revision-diff">
-      <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {statusLabel(baseline.result.status)}，当前 {statusLabel(current.status)}{sameStatus ? "（一致）" : "（发生变化）"}</div>
+      <div className={stabilityClassName(stability.kind)}>
+        基线：{behaviorLabel(interpretStability(baseline.result).behavior)}；{statusLabel(baseline.result.status)}
+        <br />
+        当前：{behaviorLabel(interpretStability(current).behavior)}；{statusLabel(current.status)}
+        <br />{stability.message}
+      </div>
       <table>
         <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th><th></th></tr></thead>
         <tbody>

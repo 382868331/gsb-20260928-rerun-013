@@ -150,3 +150,48 @@ def test_window_exceeded_result_and_cursor_survive_save_and_reopen(tmp_path):
     assert widened["status"] == "stable"
     assert widened["settledTime"] == loaded["baseline"]["result"]["settledTime"]
     assert widened["circuitFingerprint"] == loaded["baseline"]["result"]["circuitFingerprint"]
+
+
+@pytest.mark.parametrize(
+    ("example_id", "short_window", "long_window", "settles"),
+    [
+        ("combinational", 20, 311, True),
+        ("latch", 30, 180, True),
+        ("oscillator", 20, 311, False),
+    ],
+)
+def test_saved_short_window_keeps_same_behavior_conclusion_after_reopen(tmp_path, example_id, short_window, long_window, settles):
+    example = get_example(example_id)
+    short = simulate(example["circuit"], example["stimulus"], max_time=short_window)
+    long = simulate(example["circuit"], example["stimulus"], max_time=long_window)
+    cursor = {"time": long_window, "fingerprint": long["fingerprint"]}
+
+    store = CircuitStore(tmp_path / "circuits.json")
+    saved = store.save({
+        "name": f"{example_id} 长窗口基线缩短观察",
+        "circuit": example["circuit"],
+        "stimulus": example["stimulus"],
+        "maxTime": short_window,
+        "cursor": cursor,
+        "baseline": {"label": f"原 {long_window}ns 窗口结果", "fingerprint": long["fingerprint"], "result": long},
+    })
+
+    loaded = CircuitStore(tmp_path / "circuits.json").get(saved["id"])
+    assert loaded["maxTime"] == short_window
+    assert loaded["cursor"] == cursor
+    assert loaded["baseline"]["result"]["fingerprint"] == long["fingerprint"]
+    assert loaded["baseline"]["result"]["maxTime"] == long_window
+
+    reopened_short = simulate(loaded["circuit"], loaded["stimulus"], max_time=short_window)
+    assert reopened_short["fingerprint"] == short["fingerprint"]
+    if settles:
+        assert loaded["baseline"]["result"]["status"] == "stable"
+        assert reopened_short["status"] == "window_exceeded"
+        assert long["status"] == "stable"
+        assert reopened_short["settledTime"] == loaded["baseline"]["result"]["settledTime"] == long["settledTime"]
+    else:
+        assert reopened_short["status"] == loaded["baseline"]["result"]["status"] == long["status"] == "oscillating"
+        assert reopened_short["settledTime"] is loaded["baseline"]["result"]["settledTime"] is long["settledTime"] is None
+
+    assert loaded["baseline"]["result"]["circuitFingerprint"] == long["circuitFingerprint"]
+    assert loaded["baseline"]["result"]["stimulusFingerprint"] == long["stimulusFingerprint"]

@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+import pytest
+
 from examples import get_example
 from simulator import circuit_fingerprint, simulate, stimulus_fingerprint, validate_circuit
 
@@ -176,6 +178,32 @@ def test_not_ring_is_oscillating_in_short_and_long_windows():
         assert result["status"] == "oscillating"
         assert result["pendingEvents"] > 0
         assert result["settledTime"] is None
+
+
+@pytest.mark.parametrize(
+    ("example_id", "short_window", "long_window", "settles"),
+    [
+        ("combinational", 20, 311, True),
+        ("latch", 30, 180, True),
+        ("oscillator", 20, 311, False),
+    ],
+)
+def test_short_and_long_windows_share_circuit_behavior_diagnosis(example_id, short_window, long_window, settles):
+    example = get_example(example_id)
+    short = simulate(example["circuit"], example["stimulus"], max_time=short_window)
+    long = simulate(example["circuit"], example["stimulus"], max_time=long_window)
+
+    assert short["circuitFingerprint"] == long["circuitFingerprint"]
+    assert short["stimulusFingerprint"] == long["stimulusFingerprint"]
+    assert short["fingerprint"] != long["fingerprint"]
+
+    if settles:
+        assert short["status"] == "window_exceeded"
+        assert long["status"] == "stable"
+        assert short["settledTime"] == long["settledTime"]
+    else:
+        assert short["status"] == long["status"] == "oscillating"
+        assert short["settledTime"] is long["settledTime"] is None
 
 
 def test_window_change_does_not_change_stimulus_or_circuit_fingerprint():

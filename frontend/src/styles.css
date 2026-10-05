@@ -144,6 +144,7 @@ h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: #
 .disconnected { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
 .contention { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
 .ok { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; padding: 7px 8px; border-radius: 7px; }
+.stability-note { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; padding: 7px 8px; border-radius: 7px; }
 
 @media (max-width: 1200px) {
   .workspace { grid-template-columns: 240px 1fr 330px; }
