@@ -16,6 +16,7 @@ import { api } from "./api";
 import { circuitFingerprint, shortFingerprint, simulationFingerprint, stimulusFingerprint } from "./fingerprint";
 import { nodeTypes } from "./GateNode";
 import { WaveformPanel, type LocateRequest } from "./WaveformPanel";
+import { compareStability, effectiveStabilityLabel, resultSettledTime, statusLabel } from "./stability";
 import type {
   Circuit,
   CircuitNode,
@@ -694,29 +695,48 @@ export function App() {
   );
 }
 
-function statusLabel(status: SimulationResult["status"]): string {
-  switch (status) {
-    case "stable": return "已稳定";
-    case "window_exceeded": return "观察窗口结束，仍有未来事件";
-    case "oscillating": return "持续振荡";
-    default: return "无法判定";
-  }
-}
-
 function StatusCard({ result, current }: { result: SimulationResult; current: boolean }) {
   const text = statusLabel(result.status);
+  const settledTime = resultSettledTime(result);
   return (
     <div className={`status ${result.status}`}>
       <strong>{text}</strong>
       <span>电路指纹 {shortFingerprint(result.fingerprint)}{current ? " · 与当前画布一致" : " · 与当前画布不一致"}</span>
       <span>已处理 {result.processedEvents} 个事件；未处理 {result.pendingEvents} 个</span>
-      {result.status === "window_exceeded" && result.settledTime != null && (
-        <span>剩余事件只是发生在观察截止之后，电路于 t={result.settledTime} 稳定，并非振荡；扩大窗口可复验。</span>
+      {result.status === "window_exceeded" && settledTime != null && (
+        <span>剩余事件只是发生在观察截止（{result.maxTime} ns）之后；{effectiveStabilityLabel("stable")}于 t={settledTime}，并非振荡。扩大或缩短窗口只改变观察充分性，不改变电路行为，结果来源指纹 {shortFingerprint(result.fingerprint)}。</span>
       )}
-      {result.status === "stable" && result.settledTime != null && result.settledTime > 0 && (
-        <span>最后一次事件在 t={result.settledTime}，此后队列已清空。</span>
+      {result.status === "stable" && settledTime != null && settledTime > 0 && (
+        <span>最后一次事件在 t={settledTime}，此后队列已清空。</span>
       )}
       {result.reason && <span>{result.reason}</span>}
+    </div>
+  );
+}
+
+function StabilitySummary({ left, right, leftName, rightName }: { left: SimulationResult; right: SimulationResult; leftName: string; rightName: string }) {
+  const comparison = compareStability(left, right);
+  if (comparison.sameBehavior && comparison.sameStability) {
+    const detail = comparison.windowOnly && comparison.settledTime != null
+      ? `差异只来自观测窗口（${left.maxTime} ns / ${right.maxTime} ns）：${effectiveStabilityLabel(comparison.left)}，实际稳定时刻同为 t=${comparison.settledTime}，属于观察不足，电路行为没有改变。`
+      : "两次运行的电路、激励与稳定性结论一致。";
+    return (
+      <div className="ok">
+        {effectiveStabilityLabel(comparison.left)}（一致）：{leftName} {statusLabel(left.status)}，{rightName} {statusLabel(right.status)}。{detail}
+      </div>
+    );
+  }
+  if (comparison.sameStability) {
+    return (
+      <div className="ok">
+        稳定性结论一致（均为{effectiveStabilityLabel(comparison.left)}），但{leftName}与{rightName}的电路或激励不同；跳变时刻差异见下表，并非观察窗口造成。
+      </div>
+    );
+  }
+  const behaviorNote = comparison.sameBehavior ? "电路与激励相同，差异来自观察是否充分。" : "电路或激励已改变，属于电路行为改变。";
+  return (
+    <div className="contention">
+      稳定性结论不同：{leftName} {effectiveStabilityLabel(comparison.left)}，{rightName} {effectiveStabilityLabel(comparison.right)}。{behaviorNote}
     </div>
   );
 }
@@ -788,6 +808,7 @@ function PlanDiff({
           </button>
         )}
       </div>
+      <StabilitySummary left={current} right={compare} leftName={`${currentPlan.name} 当前`} rightName={comparePlan.name} />
       <table>
         <thead><tr><th>t</th><th>输入</th><th>{currentPlan.name}</th><th>{comparePlan.name}</th></tr></thead>
         <tbody>
@@ -826,10 +847,21 @@ function RevisionDiff({ current, baseline, onLocate }: { current: SimulationResu
       return { nodeId, value, baseTime, currentTime, delta };
     });
   }).filter((row) => row.delta !== 0 || row.baseTime === undefined || row.currentTime === undefined);
-  const sameStatus = current.status === baseline.result.status;
+  const stability = compareStability(current, baseline.result);
+  const bannerClass = stability.sameStability ? "ok" : "contention";
+  let bannerText: string;
+  if (stability.sameBehavior && stability.windowOnly && stability.settledTime != null) {
+    bannerText = `稳定性一致（${effectiveStabilityLabel(stability.left)}，实际 t=${stability.settledTime} 稳定）：基线 ${statusLabel(baseline.result.status)}（窗口 ${baseline.result.maxTime} ns），当前 ${statusLabel(current.status)}（窗口 ${current.maxTime} ns）。这只是观察窗口不足，电路与激励未改变。`;
+  } else if (stability.sameBehavior) {
+    bannerText = `稳定性一致：基线与当前均为${effectiveStabilityLabel(stability.left)}。`;
+  } else if (stability.sameStability) {
+    bannerText = `稳定性一致：基线与当前均为${effectiveStabilityLabel(stability.left)}；电路或激励已修订，差异体现在跳变时刻而非稳定性。观察状态：基线 ${statusLabel(baseline.result.status)}，当前 ${statusLabel(current.status)}。`;
+  } else {
+    bannerText = `稳定性发生改变：基线 ${effectiveStabilityLabel(stability.left)}，当前 ${effectiveStabilityLabel(stability.right)}（电路或激励已修订）。观察状态：基线 ${statusLabel(baseline.result.status)}，当前 ${statusLabel(current.status)}。`;
+  }
   return (
     <div className="revision-diff">
-      <div className={sameStatus ? "ok" : "contention"}>稳定性：基线 {statusLabel(baseline.result.status)}，当前 {statusLabel(current.status)}{sameStatus ? "（一致）" : "（发生变化）"}</div>
+      <div className={bannerClass}>{bannerText}</div>
       <table>
         <thead><tr><th>节点</th><th>值</th><th>基线 t</th><th>当前 t</th><th>传播差</th><th></th></tr></thead>
         <tbody>

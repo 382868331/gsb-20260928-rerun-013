@@ -60,6 +60,43 @@ def test_mid_comparison_state_round_trips_through_save_and_reload(tmp_path):
     assert loaded["baseline"]["result"]["waveforms"] == baseline_result["waveforms"]
 
 
+def test_window_only_baseline_keeps_same_stability_conclusion_after_reload(tmp_path):
+    example = get_example("combinational")
+    circuit = example["circuit"]
+    stimulus = example["stimulus"]
+    wide = simulate(circuit, stimulus, max_time=311)
+    narrow = simulate(circuit, stimulus, max_time=20)
+    assert wide["status"] == "stable"
+    assert narrow["status"] == "window_exceeded"
+    assert wide["circuitFingerprint"] == narrow["circuitFingerprint"]
+    assert wide["stimulusFingerprint"] == narrow["stimulusFingerprint"]
+    assert wide["settledTime"] == narrow["settledTime"] == 130
+
+    cursor = {"time": 15, "fingerprint": narrow["fingerprint"]}
+    store = CircuitStore(tmp_path / "circuits.json")
+    saved = store.save({
+        "name": "只缩短窗口",
+        "circuit": circuit,
+        "stimulus": stimulus,
+        "plans": [{"id": "plan-1", "name": "方案 A", "version": 1, "initial": stimulus.get("initial", {}), "events": stimulus["events"]}],
+        "activePlanId": "plan-1",
+        "baseline": {"label": "311 窗口基线", "fingerprint": wide["fingerprint"], "result": wide},
+        "maxTime": 20,
+        "cursor": cursor,
+    })
+
+    reopened = CircuitStore(tmp_path / "circuits.json").get(saved["id"])
+    reopened_baseline = reopened["baseline"]["result"]
+    assert reopened["maxTime"] == 20
+    assert reopened["cursor"] == cursor
+    assert reopened_baseline["status"] == "stable"
+    assert reopened_baseline["maxTime"] == 311
+    assert reopened_baseline["settledTime"] == 130
+    assert reopened_baseline["fingerprint"] == wide["fingerprint"]
+    rerun_narrow = simulate(reopened["circuit"], reopened["stimulus"], max_time=reopened["maxTime"])
+    assert rerun_narrow == simulate(circuit, stimulus, max_time=20)
+
+
 def test_reopen_then_modify_short_pulse_keeps_baseline_and_changes_fingerprint(tmp_path):
     store = CircuitStore(tmp_path / "circuits.json")
     circuit, plans = make_short_pulse_payload()
